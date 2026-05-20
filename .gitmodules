@@ -1,0 +1,6 @@
+[submodule "thirdparties/HoloMotion"]
+	path = thirdparties/HoloMotion
+	url = https://github.com/HorizonRobotics/HoloMotion
+[submodule "thirdparties/GR00T-WholeBodyControl"]
+	path = thirdparties/GR00T-WholeBodyControl
+	url = https://github.com/NVlabs/GR00T-WholeBodyControl
