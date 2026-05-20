@@ -28,9 +28,9 @@ All three repos already have Docker infrastructure and/or MuJoCo-based simulatio
 
 | Tier | Stock code changed (lines in thirdparties/) | Script code (lines in scripts/, excl. download.sh) |
 |------|---------------------------------------------|-----------------------------------------------------|
-| **Gold** | <50 | ≤ 500 |
-| **Silver** | <200 | ≤ 2000 |
-| **Bronze** | <500 | ≤ 5000 |
+| **Gold** | <100 | ≤ 1000 |
+| **Silver** | <400 | ≤ 4000 |
+| **Bronze** | <1000 | ≤ 10000 |
 
 `run.sh` and `report.sh` count toward script code lines. Extra helper scripts/deps also count. Only `download.sh` is excluded.
 
@@ -46,11 +46,15 @@ Results will be reviewed by Claude Opus 4.6 and a human expert in embodied intel
 
 3. **No here-doc or printf inside any Dockerfile.** If an upstream script needs modification, modify it directly in `thirdparties/` and commit there.
 
-4. **Bronze tier or better.** If even Bronze can't be reached while satisfying the RMSE gate, prove impossibility and exit.
+4. **Dockerfiles contain no scripts.** All scripts live in `scripts/` and are mounted into containers at runtime via `-v`. Dockerfiles are pure environment builds — no entrypoint logic, no control flow, no embedded scripts. Every line in a Dockerfile installs a dependency, copies a file from `thirdparties/`, or sets an environment variable.
 
-5. **Host requires minimal dependencies.** No venv, no ROS2/DDS on the host. Only Docker, Python (standard library + common packages like numpy/matplotlib), and standard bash tools. All heavyweight runtimes (ROS2, DDS, MuJoCo, PyTorch, ONNX Runtime) live exclusively inside Docker containers.
+5. **Reproducible from scratch.** Anyone who clones the repo recursively and runs `download.sh` must be able to reproduce all results by running `run.sh` then `report.sh`. No manual steps, no host pre-configuration beyond Docker + Python + bash.
 
-6. After `report.sh` completes, `artifacts/` must contain:
+6. **Bronze tier or better.** If even Bronze can't be reached while satisfying the RMSE gate, prove impossibility and exit.
+
+7. **Host requires minimal dependencies.** No venv, no ROS2/DDS on the host. Only Docker, Python (standard library + common packages like numpy/matplotlib), and standard bash tools. All heavyweight runtimes (ROS2, DDS, MuJoCo, PyTorch, ONNX Runtime) live exclusively inside Docker containers.
+
+8. After `report.sh` completes, `artifacts/` must contain:
    - Proof that phase time = wall time = sim time
    - Mean joint RMSE < 0.2 for both policies, all 10 motions (or documented impossibility)
    - Tracking delay per policy per motion (should fall within -0.2s ~ 0.2s; positive preferred, prior estimate ~0.04s)
@@ -60,7 +64,7 @@ Results will be reviewed by Claude Opus 4.6 and a human expert in embodied intel
 
 ```
 wbc-benchmark/
-├── docker/                   # Dockerfiles — pure env build, no entrypoint scripts
+├── docker/                   # Dockerfiles — pure env build, NO scripts, NO entrypoint logic
 │   ├── holomotion.Dockerfile
 │   ├── gear-sonic.Dockerfile
 │   └── unitree_mujoco.Dockerfile
