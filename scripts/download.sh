@@ -20,8 +20,8 @@ if ! command -v hf &>/dev/null; then
     fi
 fi
 
-echo "[download_assets] Downloading HoloMotion_v1.2..."
-hf download HorizonRobotics/HoloMotion_v1.2 --local-dir HoloMotion_v1.2
+echo "[download_assets] Downloading HoloMotion_models..."
+hf download HorizonRobotics/HoloMotion_models --local-dir HoloMotion_models
 
 echo "[download_assets] Downloading GEAR-SONIC..."
 hf download nvidia/GEAR-SONIC --local-dir GEAR-SONIC \

@@ -1,7 +1,88 @@
-## Task
+# WBC Benchmark — HoloMotion vs GEAR-SONIC on Unitree G1 29DOF
 
-- [ ] Run [HoloMotion](https://github.com/HorizonRobotics/HoloMotion) deployment for v1.3.0 & Unitree G1 29DOF motion tracking in a Docker container, give a Dockerfile and a run script. Use the ROS2 path, avoid changing or adding code if possible
-- [ ] Run [GEAR-SONIC](https://github.com/NVlabs/GR00T-WholeBodyControl) deployment for latest commit & Unitree G1 29DOF motion tracking in a Docker container, give a Dockerfile and a run script
-- [ ] Run [unitree_mujoco](https://github.com/unitreerobotics/unitree_mujoco) of latest commit & Unitree G1 29DOF in a Docker container.
-- [ ] A script that launches automated test for HoloMotion / GEAR-SONIC deployment + unitree_mujoco simulation. Leave logs that prove phase time (nominal motion time) = wall time = sim time, artifact enough to calculate motion RMSE & delay, and generate post-rendered side-by-side comparing video.
+## Pre-existing assets
 
+`assets/` contains pre-downloaded artifacts (Docker build context, do not re-download):
+
+| Path | Content |
+|------|---------|
+| `assets/motions.zip` | 10 motion clips in two formats: `sonic_motions/<name>/` (CSV: joint_pos, joint_vel, body_pos, body_quat, body_lin_vel, body_ang_vel, metadata.txt, info.txt) and `holomotion_motions/<name>_holomotion.npz` |
+| `assets/GEAR-SONIC/` | Pre-downloaded ONNX models: `model_encoder.onnx` (~50MB), `model_decoder.onnx` (~40MB), `observation_config.yaml` |
+| `assets/HoloMotion_models/` | Pre-downloaded ONNX models: `HoloMotion_motion_tracking_model/exported/motion_tracking_model.onnx`, `HoloMotion_velocity_tracking_model/exported/velocity_model.onnx` |
+
+Motions are already format-converted. Each policy gets its expected format: SONIC reads CSV from `sonic_motions/`, HoloMotion reads NPZ from `holomotion_motions/`.
+
+## Pre-existing thirdparties
+
+`thirdparties/` contains upstream repos (Docker build context):
+
+| Path | Version | Key paths |
+|------|---------|-----------|
+| `thirdparties/HoloMotion/` | v1.3.0 | `deployment/unitree_g1_ros2_29dof/` — Docker launch scripts. Conda env: PyTorch 2.3.1, CUDA 12.1, onnxruntime-gpu, MuJoCo. `environments/` — conda env YAMLs + pip requirements. |
+| `thirdparties/GR00T-WholeBodyControl/` | latest main | `gear_sonic_deploy/docker/Dockerfile.ros2` — CUDA 12.4.1 + ROS2 Humble. `gear_sonic_deploy/` — deployment framework. `install_scripts/` — uv-based install (install_mujoco_sim.sh, install_ros.sh, etc.). |
+| `thirdparties/unitree_mujoco/` | latest | `simulate/` — C++ MuJoCo simulator (recommended). `simulate_python/` — Python simulator. `unitree_robots/` — MJCF robot descriptions (G1 29DOF supported). Uses DDS/unitree_sdk2 for low-level motor I/O (`LowCmd`, `LowState`). |
+
+All three repos already have Docker infrastructure and/or MuJoCo-based simulation. Pre-existing scripts should be reused — prefer them over writing new code.
+
+## Rating tiers
+
+| Tier | Stock code changed (lines in thirdparties/) | Script code (lines in scripts/, excl. download.sh) |
+|------|---------------------------------------------|-----------------------------------------------------|
+| **Gold** | <50 | ≤ 500 |
+| **Silver** | <200 | ≤ 2000 |
+| **Bronze** | <500 | ≤ 5000 |
+
+`run.sh` and `report.sh` count toward script code lines. Extra helper scripts/deps also count. Only `download.sh` is excluded.
+
+**Bronze is the hard gate.** If Bronze is impossible while meeting the RMSE < 0.2 hard gate, prove why and exit.
+
+Results will be reviewed by Claude Opus 4.6 and a human expert in embodied intelligence. They prefer a clean project structure that runs elegantly, not something hard to maintain and reproduce. Everything runs inside Docker — anyone with Docker can reproduce.
+
+## Hard gates
+
+1. **Mean joint RMSE < 0.2** for both SONIC and HoloMotion on all 10 motions, **computed after aligning reference and tracked trajectories by the measured tracking delay**. (Without delay alignment, RMSE is inflated by the time offset and does not reflect tracking quality.) If impossible, prove why (dependency breaks in Docker, malformed motion, etc.).
+
+2. **Dockerfiles stay as close as possible to the original environment** — follow each repo's official docs. Prefer installing dependencies and using pre-existing scripts from upstream repos over writing custom scripts. Robotic research debugging without vision is very hard; staying close to official repos/documents is the only safe path.
+
+3. **No here-doc or printf inside any Dockerfile.** If an upstream script needs modification, modify it directly in `thirdparties/` and commit there.
+
+4. **Bronze tier or better.** If even Bronze can't be reached while satisfying the RMSE gate, prove impossibility and exit.
+
+5. **Host requires minimal dependencies.** No venv, no ROS2/DDS on the host. Only Docker, Python (standard library + common packages like numpy/matplotlib), and standard bash tools. All heavyweight runtimes (ROS2, DDS, MuJoCo, PyTorch, ONNX Runtime) live exclusively inside Docker containers.
+
+6. After `report.sh` completes, `artifacts/` must contain:
+   - Proof that phase time = wall time = sim time
+   - Mean joint RMSE < 0.2 for both policies, all 10 motions (or documented impossibility)
+   - Tracking delay per policy per motion (should fall within -0.2s ~ 0.2s; positive preferred, prior estimate ~0.04s)
+   - Side-by-side comparison video (HoloMotion vs SONIC, reference ghost overlay, metrics burned in)
+
+## Folder structure
+
+```
+wbc-benchmark/
+├── docker/                   # Dockerfiles — pure env build, no entrypoint scripts
+│   ├── holomotion.Dockerfile
+│   ├── gear-sonic.Dockerfile
+│   └── unitree_mujoco.Dockerfile
+├── scripts/
+│   ├── run.sh                # Entrypoint 1: build, deploy, run a policy+motion pair
+│   ├── report.sh             # Entrypoint 2: generate all reports from collected logs
+│   └── download.sh           # Asset downloader (excluded from script count)
+├── assets/                   # Pre-formatted motion clips + model weights (build context)
+├── thirdparties/             # Upstream repos (build context)
+├── logs/                     # Raw runtime output per run
+└── artifacts/                # Final reports & video covering all 10 motions
+```
+
+`scripts/` has no subdirectories. Extra dependency files live flat alongside run.sh and report.sh, and count toward the tier limit.
+
+## Hints (not requirements)
+
+1. unitree_mujoco runs as shared simulator; HoloMotion and SONIC connect to it as control policies.
+2. Event transport via ROS2 or DDS — use whatever the policy already listens to. These repos should not require source changes to run (preliminary tests indicate they work stock).
+3. Timing events: SELECT_MOTION, CONTROL at 1s, RELEASE at 2s, START_POLICY at 3s, motion ends at nominal clip duration.
+4. Be lazy — search the web, check GitHub issues, find existing repos and Dockerfiles that can be reused. Only write custom code when necessary and you know exactly what you're doing. Error-prone to implement from scratch.
+5. Tiering is a general template. Some repos may need mandatory changes to run in Docker. But these two (HoloMotion, SONIC) should work without stock changes if preliminary tests are correct.
+6. Each agent/session should focus on exactly one atomic, clear task. Each atomic task corresponds to exactly one git commit. No multi-tasking within a single commit — keep changes small, reviewable, and semantically coherent.
+7. Ideal structure: stock GR00T & HoloMotion deploy runs in the "lo" network interface with zero code changes. unitree_mujoco runs in its own Docker container with a lightweight data collector (sample at ≤50 Hz; do not over-collect — too much data prevents simulation time from keeping pace with wall time). `run.sh` is a thin orchestrator that sends key events or virtual joystick events to deploy/simulator containers. `report.sh` shells into the simulator container to generate video and metrics.
+8. These guidelines describe what great looks like, but they are not assessment rules. Do not use hacky workarounds to technically satisfy a line count or tier while violating the spirit of the benchmark. Claude Opus 4.6 and a human expert in embodied intelligence will review the final result — adhere to sound engineering principles throughout.

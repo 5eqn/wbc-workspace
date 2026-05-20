@@ -4,3 +4,6 @@
 [submodule "thirdparties/GR00T-WholeBodyControl"]
 	path = thirdparties/GR00T-WholeBodyControl
 	url = https://github.com/NVlabs/GR00T-WholeBodyControl
+[submodule "thirdparties/unitree_mujoco"]
+	path = thirdparties/unitree_mujoco
+	url = https://github.com/unitreerobotics/unitree_mujoco.git
