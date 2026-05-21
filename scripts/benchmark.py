@@ -1171,7 +1171,7 @@ def pulse_holomotion_key(control_file: Path, key: str, *, hold_s: float = 0.16, 
     time.sleep(gap_s)
 
 
-def tap_holomotion_key(control_file: Path, key: str, *, gap_s: float = 0.08) -> None:
+def tap_holomotion_key(control_file: Path, key: str, *, gap_s: float = 0.20) -> None:
     update_control_file(control_file, wireless_keys=0, wireless_keys_once=HOLO_KEY_BITS[key])
     time.sleep(gap_s)
 
@@ -1187,29 +1187,49 @@ def wait_for_new_log_marker(log_path: Path, marker: str, start_offset: int, time
     raise TimeoutError(f"timed out waiting for new log marker {marker!r}")
 
 
+def wait_for_holomotion_clip_selection(
+    log_path: Path,
+    start_offset: int,
+    expected_clip: str,
+    timeout_s: float,
+) -> tuple[int, str]:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        text = read_log_text(log_path)
+        found = text.find(expected_clip, start_offset)
+        if found >= 0:
+            line_start = text.rfind("\n", 0, found) + 1
+            line_end = text.find("\n", found)
+            if line_end < 0:
+                line_end = len(text)
+            line = text[line_start:line_end]
+            if "Selected " in line and "motion clip" in line:
+                return len(text), line.split("] ", 1)[-1]
+        time.sleep(0.05)
+    raise TimeoutError(f"timed out waiting for HoloMotion clip selection {expected_clip!r}")
+
+
 def select_holomotion_clip(control_file: Path, log_path: Path, motion: str, timeout_s: float) -> str:
     clip_index = holomotion_clip_index(motion)
     log_offset = len(read_log_text(log_path))
     tap_holomotion_key(control_file, "left")
-    log_offset, marker = wait_for_new_log_marker(
+    log_offset, marker = wait_for_holomotion_clip_selection(
         log_path,
-        "Selected first motion clip",
         log_offset,
+        f"{MOTIONS[0]}_holomotion.npz",
         timeout_s,
     )
-    for _ in range(clip_index):
+    for next_index in range(1, clip_index + 1):
         tap_holomotion_key(control_file, "down")
-        log_offset, marker = wait_for_new_log_marker(
+        log_offset, marker = wait_for_holomotion_clip_selection(
             log_path,
-            "Selected next motion clip",
             log_offset,
+            f"{MOTIONS[next_index]}_holomotion.npz",
             timeout_s,
         )
     expected_clip = f"{motion}_holomotion.npz"
-    text = read_log_text(log_path)
-    tail = text[max(0, log_offset - 1000):log_offset + 1000]
-    if expected_clip not in tail:
-        raise RuntimeError(f"HoloMotion selected clip did not settle on {expected_clip}")
+    if expected_clip not in marker:
+        raise RuntimeError(f"HoloMotion selected clip did not settle on {expected_clip}: {marker}")
     return marker
 
 

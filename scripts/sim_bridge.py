@@ -142,6 +142,8 @@ def main() -> int:
     data.qpos[0:3] = [0.0, 0.0, float(args.support_height)]
     mujoco.mj_forward(model, data)
     bridge = UnitreeSdk2Bridge(model, data)
+    if hasattr(bridge.lowStateThread, "Stop"):
+        bridge.lowStateThread.Stop()
     support_root_qpos = data.qpos[:7].copy()
     support_root_qvel = data.qvel[:6].copy()
 
@@ -173,6 +175,7 @@ def main() -> int:
                 float(control.get("rx", 0.0)),
                 float(control.get("ry", 0.0)),
             )
+            bridge.PublishLowState()
 
             if support_active:
                 data.qpos[:7] = support_root_qpos

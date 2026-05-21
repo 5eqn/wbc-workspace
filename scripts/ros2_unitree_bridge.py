@@ -32,6 +32,7 @@ class UnitreeRos2Bridge(Node):
         self.dds_lowstate_sub = ChannelSubscriber("rt/lowstate", DdsLowState)
         self.dds_lowstate_sub.Init(self.on_dds_lowstate, 10)
         self.last_lowstate_wall = 0.0
+        self.forwarded_dpad_bits = 0
 
     def on_dds_lowstate(self, msg: DdsLowState) -> None:
         out = RosLowState()
@@ -56,6 +57,16 @@ class UnitreeRos2Bridge(Node):
             out.motor_state[i].motorstate = int(motor.motorstate)
             copy_sequence(out.motor_state[i].reserve, motor.reserve)
         copy_sequence(out.wireless_remote, msg.wireless_remote)
+        key_bits = int(msg.wireless_remote[2]) | (int(msg.wireless_remote[3]) << 8)
+        dpad_bits = key_bits & 0xF000
+        if dpad_bits == 0:
+            self.forwarded_dpad_bits = 0
+        elif self.forwarded_dpad_bits == dpad_bits:
+            filtered = key_bits & ~dpad_bits
+            out.wireless_remote[2] = filtered & 0xFF
+            out.wireless_remote[3] = (filtered >> 8) & 0xFF
+        else:
+            self.forwarded_dpad_bits = dpad_bits
         copy_sequence(out.reserve, msg.reserve)
         out.crc = int(msg.crc)
         self.lowstate_pub.publish(out)
