@@ -59,7 +59,7 @@ def read_control(path: Path, previous: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return previous
     control = dict(previous)
-    for key in ("support_active", "wireless_keys", "lx", "ly", "rx", "ry", "stop"):
+    for key in ("support_active", "wireless_keys", "wireless_keys_once", "lx", "ly", "rx", "ry", "stop"):
         if key in raw:
             control[key] = raw[key]
     return control
@@ -157,7 +157,10 @@ def main() -> int:
             if bool(control.get("stop", False)):
                 break
 
-            keys = int(control.get("wireless_keys", 0))
+            one_shot_keys = int(control.pop("wireless_keys_once", 0) or 0)
+            if one_shot_keys:
+                write_control(control_path, control)
+            keys = one_shot_keys or int(control.get("wireless_keys", 0))
             support_active = bool(control.get("support_active", True))
             set_wireless_remote(
                 bridge.low_state,

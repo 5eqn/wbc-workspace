@@ -1135,6 +1135,48 @@ def pulse_holomotion_key(control_file: Path, key: str, *, hold_s: float = 0.16, 
     time.sleep(gap_s)
 
 
+def tap_holomotion_key(control_file: Path, key: str, *, gap_s: float = 0.08) -> None:
+    update_control_file(control_file, wireless_keys=0, wireless_keys_once=HOLO_KEY_BITS[key])
+    time.sleep(gap_s)
+
+
+def wait_for_new_log_marker(log_path: Path, marker: str, start_offset: int, timeout_s: float) -> tuple[int, str]:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        text = read_log_text(log_path)
+        found = text.find(marker, start_offset)
+        if found >= 0:
+            return len(text), marker
+        time.sleep(0.05)
+    raise TimeoutError(f"timed out waiting for new log marker {marker!r}")
+
+
+def select_holomotion_clip(control_file: Path, log_path: Path, motion: str, timeout_s: float) -> str:
+    clip_index = holomotion_clip_index(motion)
+    log_offset = len(read_log_text(log_path))
+    tap_holomotion_key(control_file, "left")
+    log_offset, marker = wait_for_new_log_marker(
+        log_path,
+        "Selected first motion clip",
+        log_offset,
+        timeout_s,
+    )
+    for _ in range(clip_index):
+        tap_holomotion_key(control_file, "down")
+        log_offset, marker = wait_for_new_log_marker(
+            log_path,
+            "Selected next motion clip",
+            log_offset,
+            timeout_s,
+        )
+    expected_clip = f"{motion}_holomotion.npz"
+    text = read_log_text(log_path)
+    tail = text[max(0, log_offset - 1000):log_offset + 1000]
+    if expected_clip not in tail:
+        raise RuntimeError(f"HoloMotion selected clip did not settle on {expected_clip}")
+    return marker
+
+
 def release_support(run_dir: Path, control_file: Path, event_log: SequenceEventLog, detail: str) -> None:
     row = latest_sim_status(run_dir)
     event_log.append(
@@ -1335,14 +1377,12 @@ def run_holomotion_sequence(args: argparse.Namespace, run_dir: Path, control_fil
             detail=marker,
         )
 
-        pulse_holomotion_key(control_file, "left")
-        for _ in range(holomotion_clip_index(args.motion)):
-            pulse_holomotion_key(control_file, "down")
+        marker = select_holomotion_clip(control_file, policy.log_path, args.motion, args.policy_ready_timeout_s)
         event_log.append(
             "motion_selected",
             sim_time_s=latest_sim_time(run_dir),
             support_active=1,
-            detail=f"selected {args.motion} using stock HoloMotion D-pad controls",
+            detail=f"{marker}: {args.motion}_holomotion.npz",
         )
 
         release_support(run_dir, control_file, event_log, "release simulator support after HoloMotion CONTROL")
