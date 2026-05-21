@@ -456,7 +456,7 @@ class UnitreeG1Bridge:
             self.secondary_imu.quaternion[:] = [float(v) for v in torso_quat]
             self.secondary_imu.rpy[:] = list(quat_to_rpy_wxyz(torso_quat))
             self.secondary_imu.gyroscope[:] = [float(v) for v in torso_vel[0:3]]
-            self.secondary_imu.accelerometer[:] = [float(v) for v in self.data.qacc[0:3]]
+            self.secondary_imu.accelerometer[:] = [0.0, 0.0, 0.0]
             self.secondary_imu_pub.Write(self.secondary_imu)
 
 
@@ -521,6 +521,12 @@ def open_logs(out_dir: Path, num_motor: int):
 
     lowcmd_fields = (
         ["time_s", "sim_time_s"]
+        + [f"cmd_q_{i}" for i in range(num_motor)]
+        + [f"cmd_dq_{i}" for i in range(num_motor)]
+        + [f"cmd_tau_{i}" for i in range(num_motor)]
+        + [f"cmd_kp_{i}" for i in range(num_motor)]
+        + [f"cmd_kd_{i}" for i in range(num_motor)]
+        + [f"ctrl_{i}" for i in range(num_motor)]
         + [f"measured_q_{i}" for i in range(num_motor)]
         + [f"measured_dq_{i}" for i in range(num_motor)]
         + [f"tau_est_{i}" for i in range(num_motor)]
@@ -540,6 +546,7 @@ def main() -> int:
     parser.add_argument("--duration-s", type=float, default=2.0)
     parser.add_argument("--dt", type=float, default=0.005)
     parser.add_argument("--log-hz", type=float, default=50.0)
+    parser.add_argument("--publish-every", type=int, default=1)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--control-file", default="")
     parser.add_argument("--support-active", type=int, default=1)
@@ -549,6 +556,7 @@ def main() -> int:
     parser.add_argument("--init-reference-frame", type=int, default=0)
     parser.add_argument("--ground-clearance", type=float, default=0.001)
     args = parser.parse_args()
+    args.publish_every = max(1, args.publish_every)
 
     import mujoco
 
@@ -603,6 +611,7 @@ def main() -> int:
     started_mono = time.monotonic()
     next_log_t = 0.0
     log_dt = 1.0 / args.log_hz
+    step = 0
 
     try:
         while True:
@@ -629,15 +638,16 @@ def main() -> int:
                 data.qpos[:7] = support_root_qpos
                 data.qvel[:6] = support_root_qvel
                 mujoco.mj_forward(model, data)
-            set_wireless_remote(
-                bridge.low_state,
-                keys,
-                float(control.get("lx", 0.0)),
-                float(control.get("ly", 0.0)),
-                float(control.get("rx", 0.0)),
-                float(control.get("ry", 0.0)),
-            )
-            bridge.publish()
+            if step % args.publish_every == 0:
+                set_wireless_remote(
+                    bridge.low_state,
+                    keys,
+                    float(control.get("lx", 0.0)),
+                    float(control.get("ly", 0.0)),
+                    float(control.get("rx", 0.0)),
+                    float(control.get("ry", 0.0)),
+                )
+                bridge.publish()
 
             if data.time + 1e-9 >= next_log_t:
                 now_wall = started_wall + elapsed
@@ -677,10 +687,36 @@ def main() -> int:
                     "base_z": f"{float(data.qpos[2]):.6f}",
                 })
                 row = {"time_s": f"{elapsed:.6f}", "sim_time_s": f"{data.time:.6f}"}
+                with bridge.cmd_lock:
+                    cmd = bridge.latest_cmd if bridge.received_cmd else None
+                measured_q = bridge.body_q()
+                measured_dq = bridge.body_dq()
+                tau_est = bridge.body_tau_est()
                 for i in range(model.nu):
-                    row[f"measured_q_{i}"] = f"{float(data.sensordata[i]):.9f}"
-                    row[f"measured_dq_{i}"] = f"{float(data.sensordata[i + model.nu]):.9f}"
-                    row[f"tau_est_{i}"] = f"{float(data.sensordata[i + 2 * model.nu]):.9f}"
+                    if i < bridge.num_motor and cmd is not None:
+                        motor = cmd.motor_cmd[i]
+                        row[f"cmd_q_{i}"] = f"{float(motor.q):.9f}"
+                        row[f"cmd_dq_{i}"] = f"{float(motor.dq):.9f}"
+                        row[f"cmd_tau_{i}"] = f"{float(motor.tau):.9f}"
+                        row[f"cmd_kp_{i}"] = f"{float(motor.kp):.9f}"
+                        row[f"cmd_kd_{i}"] = f"{float(motor.kd):.9f}"
+                    else:
+                        row[f"cmd_q_{i}"] = ""
+                        row[f"cmd_dq_{i}"] = ""
+                        row[f"cmd_tau_{i}"] = ""
+                        row[f"cmd_kp_{i}"] = ""
+                        row[f"cmd_kd_{i}"] = ""
+                    if i < bridge.num_motor:
+                        actuator_id = bridge.body_actuator_ids[i]
+                        row[f"ctrl_{i}"] = f"{float(data.ctrl[actuator_id]):.9f}"
+                        row[f"measured_q_{i}"] = f"{float(measured_q[i]):.9f}"
+                        row[f"measured_dq_{i}"] = f"{float(measured_dq[i]):.9f}"
+                        row[f"tau_est_{i}"] = f"{float(tau_est[i]):.9f}"
+                    else:
+                        row[f"ctrl_{i}"] = ""
+                        row[f"measured_q_{i}"] = ""
+                        row[f"measured_dq_{i}"] = ""
+                        row[f"tau_est_{i}"] = ""
                 lowcmd_writer.writerow(row)
                 status_f.flush()
                 lowcmd_f.flush()
@@ -689,6 +725,7 @@ def main() -> int:
             sleep_s = args.dt - (time.monotonic() - started_mono - elapsed)
             if sleep_s > 0:
                 time.sleep(sleep_s)
+            step += 1
     finally:
         status_f.close()
         lowcmd_f.close()
@@ -700,6 +737,7 @@ def main() -> int:
             "duration_s": args.duration_s,
             "dt": args.dt,
             "log_hz": args.log_hz,
+            "publish_every": args.publish_every,
             "support_height": args.support_height,
             "init_reference": init_summary,
             "control_file": str(control_path),

@@ -1377,7 +1377,7 @@ def simulator_reference_args(policy: str, motion: str) -> list[str]:
 
 def simulator_scene_args(policy: str) -> list[str]:
     if policy == "sonic":
-        scene = ROOT / "thirdparties" / "GR00T-WholeBodyControl" / "gear_sonic_deploy" / "g1" / "scene_29dof.xml"
+        scene = ROOT / "thirdparties" / "unitree_mujoco" / "unitree_robots" / "g1" / "scene_29dof.xml"
     else:
         scene = ROOT / "thirdparties" / "HoloMotion" / "assets" / "robots" / "unitree" / "G1" / "29dof" / "scene_29dof.xml"
     return ["--scene", f"/workspace/wbc/{scene.relative_to(ROOT)}"]
@@ -1404,6 +1404,8 @@ def start_simulator(run_dir: Path, control_file: Path, duration_s: float, name: 
         "0.005",
         "--log-hz",
         "50",
+        "--publish-every",
+        "4" if policy == "sonic" else "1",
         "--out-dir",
         f"/workspace/wbc/{run_dir.relative_to(ROOT)}",
         "--control-file",
@@ -1418,6 +1420,7 @@ def start_simulator(run_dir: Path, control_file: Path, duration_s: float, name: 
 
 def run_sonic_sequence(args: argparse.Namespace, run_dir: Path, control_file: Path, event_log: SequenceEventLog) -> None:
     motion_root = copy_sonic_single_motion(run_dir, args.motion)
+    stock_csv_dir = run_dir / "csv"
     name = f"wbc-sonic-{args.motion[:32]}-{int(time.time())}"
     docker_rm_force(name)
     script = (
@@ -1431,8 +1434,15 @@ def run_sonic_sequence(args: argparse.Namespace, run_dir: Path, control_file: Pa
         "--obs-config policy/release/observation_config.yaml "
         "--encoder-file policy/release/model_encoder.onnx "
         "--input-type keyboard "
-        "--output-type all "
-        "--disable-crc-check"
+        "--output-type zmq "
+        "--zmq-host localhost "
+        "--zmq-out-port 15557 "
+        "--disable-crc-check "
+        "--enable-csv-logs "
+        f"--logs-dir /workspace/wbc/{stock_csv_dir.relative_to(ROOT)} "
+        f"--target-motion-logfile /workspace/wbc/{(run_dir / 'target_motion.csv').relative_to(ROOT)} "
+        f"--planner-motion-logfile /workspace/wbc/{(run_dir / 'planner_motion.csv').relative_to(ROOT)} "
+        f"--policy-input-logfile /workspace/wbc/{(run_dir / 'policy_input.csv').relative_to(ROOT)}"
     )
     policy = ManagedProcess(
         docker_base_args(name, SONIC_IMAGE, tty=True) + ["bash", "-lc", script],
