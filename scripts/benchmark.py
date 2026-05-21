@@ -469,8 +469,14 @@ def validate_images(_: argparse.Namespace) -> int:
             "check_path /opt/conda/envs/holomotion_deploy\n"
             "check_path /opt/ros/humble/setup.sh\n"
             "check_path /opt/unitree_ros2/setup.sh\n"
+            "check_path /opt/unitree_ros2/cyclonedds_ws/install/setup.bash\n"
+            "check_path /workspace/HoloMotion/deployment/unitree_g1_ros2_29dof/install/setup.bash\n"
             "check_path /opt/cyclonedds/install/lib\n"
-            "check_cmd colcon",
+            "check_cmd colcon\n"
+            "test \"$PROFILE_PYTHON\" = /usr/bin/python3\n"
+            "conda run -n holomotion_deploy python - <<'PY'\n"
+            "import zmq\n"
+            "PY",
         ),
     ]
     failures = [item for item in checks if not item["ok"]]

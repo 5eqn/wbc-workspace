@@ -18,6 +18,10 @@ COPY thirdparties/HoloMotion /workspace/HoloMotion
 COPY thirdparties/unitree_mujoco /workspace/unitree_mujoco
 RUN mkdir -p /workspace/HoloMotion/environments/environments && cp /workspace/HoloMotion/environments/requirements_deploy.txt /workspace/HoloMotion/environments/environments/requirements_deploy.txt
 RUN cd /workspace/HoloMotion && conda env create -f environments/environment_deploy.yaml
+RUN conda run -n holomotion_deploy python -m pip install --no-cache-dir pyzmq
 RUN cp -a /workspace/HoloMotion/thirdparties/unitree_ros2 /opt/unitree_ros2
 RUN cd /opt/unitree_ros2/cyclonedds_ws && PATH=/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/conda/bin bash -lc "source /opt/ros/humble/setup.bash && colcon build"
 RUN cmake -S /workspace/HoloMotion/thirdparties/cyclonedds -B /tmp/cyclonedds-build -DCMAKE_INSTALL_PREFIX=/opt/cyclonedds/install -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF && cmake --build /tmp/cyclonedds-build --target install && rm -rf /tmp/cyclonedds-build
+RUN apt-get update && apt-get install -y --no-install-recommends python3-yaml && rm -rf /var/lib/apt/lists/*
+RUN cd /workspace/HoloMotion/deployment/unitree_g1_ros2_29dof && PATH=/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/conda/bin bash -lc "source /opt/ros/humble/setup.bash && source /opt/unitree_ros2/cyclonedds_ws/install/setup.bash && colcon build"
+ENV PROFILE_PYTHON=/usr/bin/python3
