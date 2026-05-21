@@ -5,12 +5,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
 ENV CUDA_HOME=/usr/local/cuda
 ENV CUDAToolkit_ROOT=/usr/local/cuda
-ENV TensorRT_ROOT=/opt/TensorRT
+ENV TensorRT_ROOT=/usr
 ENV onnxruntime_DIR=/opt/onnxruntime/lib/cmake/onnxruntime
 ENV PATH=/usr/local/cuda/bin:${PATH}
-ENV LD_LIBRARY_PATH=/opt/TensorRT/lib:/opt/onnxruntime/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/opt/onnxruntime/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl wget git sudo lsb-release software-properties-common tzdata build-essential cmake ninja-build clang pkg-config python3 python3-pip python3-venv python3-dev libyaml-cpp-dev libspdlog-dev libboost-all-dev libglfw3-dev libzmq3-dev libmsgpack-dev ffmpeg git-lfs locales && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl wget git sudo lsb-release software-properties-common tzdata build-essential cmake ninja-build clang pkg-config python3 python3-pip python3-venv python3-dev libyaml-cpp-dev libspdlog-dev libboost-all-dev libglfw3-dev libzmq3-dev libmsgpack-dev libnvinfer-dev=10.1.0.27-1+cuda12.4 libnvinfer-headers-dev=10.1.0.27-1+cuda12.4 libnvinfer-plugin-dev=10.1.0.27-1+cuda12.4 libnvinfer-headers-plugin-dev=10.1.0.27-1+cuda12.4 libnvinfer10=10.1.0.27-1+cuda12.4 libnvinfer-plugin10=10.1.0.27-1+cuda12.4 libnvonnxparsers-dev=10.1.0.27-1+cuda12.4 libnvonnxparsers10=10.1.0.27-1+cuda12.4 ffmpeg git-lfs locales && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 COPY thirdparties/GR00T-WholeBodyControl /workspace/GR00T-WholeBodyControl

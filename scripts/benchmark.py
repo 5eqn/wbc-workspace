@@ -458,6 +458,9 @@ def validate_images(_: argparse.Namespace) -> int:
             "check_path /workspace/GR00T-WholeBodyControl/gear_sonic_deploy/deploy.sh\n"
             "check_path /opt/ros/humble/setup.bash\n"
             "check_path /opt/onnxruntime/lib\n"
+            "check_path /usr/include/x86_64-linux-gnu/NvInfer.h\n"
+            "ldconfig -p | grep -q libnvinfer\n"
+            "ldconfig -p | grep -q libnvonnxparser\n"
             "check_cmd colcon",
         ),
         docker_check(
@@ -516,6 +519,40 @@ def smoke_holomotion(_: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def smoke_sonic_build(_: argparse.Namespace) -> int:
+    script = (
+        "cd /workspace/GR00T-WholeBodyControl/gear_sonic_deploy && "
+        "source /opt/ros/humble/setup.bash && "
+        "source scripts/setup_env.sh && "
+        "rm -rf build && "
+        "cmake -S . -B build "
+        "-DCMAKE_BUILD_TYPE=Release "
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON "
+        "-DTensorRT_FIND_COMPONENTS='nvinfer;nvinfer_plugin;nvonnxparser' && "
+        "cmake --build build --target g1_deploy_onnx_ref -j$(nproc) && "
+        "test -x target/release/g1_deploy_onnx_ref"
+    )
+    result = docker_check("wbc-gear-sonic", script)
+    combined = "\n".join(
+        str(result.get(key, "")) for key in ("stdout", "stderr")
+    )
+    markers = [
+        "Found TensorRT",
+        "found components: nvinfer nvinfer_plugin nvonnxparser",
+        "Built target g1_deploy_onnx_ref",
+    ]
+    missing = [marker for marker in markers if marker not in combined]
+    ok = result["returncode"] == 0 and not missing
+    payload = {
+        "ok": ok,
+        "image": result["image"],
+        "returncode": result["returncode"],
+        "missing_markers": missing,
+    }
+    print(json.dumps(payload, indent=2))
+    return 0 if ok else 1
+
+
 def docker(args: argparse.Namespace) -> int:
     image = f"wbc-{args.image}"
     dockerfile = ROOT / "docker" / f"{args.image}.Dockerfile"
@@ -532,6 +569,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     sub.add_parser("validate-deploy").set_defaults(func=validate_deploy)
     sub.add_parser("validate-images").set_defaults(func=validate_images)
     sub.add_parser("smoke-holomotion").set_defaults(func=smoke_holomotion)
+    sub.add_parser("smoke-sonic-build").set_defaults(func=smoke_sonic_build)
     p = sub.add_parser("report")
     p.add_argument("--logs", default=str(ROOT / "logs"))
     p.add_argument("--artifacts", default=str(ROOT / "artifacts"))
