@@ -1384,6 +1384,8 @@ def start_simulator(run_dir: Path, control_file: Path, duration_s: float, name: 
         "/workspace/unitree_mujoco",
         "--robot",
         "g1",
+        "--scene",
+        "/workspace/unitree_mujoco/unitree_robots/g1/scene_29dof.xml",
         "--interface",
         "lo",
         "--duration-s",
@@ -1444,6 +1446,8 @@ def run_sonic_sequence(args: argparse.Namespace, run_dir: Path, control_file: Pa
             detail=marker,
         )
         release_support(run_dir, control_file, event_log, "release simulator support after SONIC CONTROL")
+        if args.sonic_post_release_wait_s > 0.0:
+            time.sleep(args.sonic_post_release_wait_s)
         policy.send("T")
         event_log.append(
             "sent_key_T",
@@ -1954,6 +1958,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     p.add_argument("--startup-margin-s", type=float, default=120.0)
     p.add_argument("--policy-ready-timeout-s", type=float, default=120.0)
     p.add_argument("--holomotion-default-wait-s", type=float, default=5.0)
+    p.add_argument("--sonic-post-release-wait-s", type=float, default=0.0)
     p.add_argument("--skip-gpu-preflight", action="store_true")
     p.set_defaults(func=run_motion)
     p = sub.add_parser("run-all-motions")
@@ -1962,6 +1967,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     p.add_argument("--startup-margin-s", type=float, default=120.0)
     p.add_argument("--policy-ready-timeout-s", type=float, default=120.0)
     p.add_argument("--holomotion-default-wait-s", type=float, default=5.0)
+    p.add_argument("--sonic-post-release-wait-s", type=float, default=0.0)
     p.add_argument("--skip-gpu-preflight", action="store_true")
     p.set_defaults(func=run_all_motions)
     p = sub.add_parser("docker-build")

@@ -210,10 +210,181 @@ def load_upstream_bridge(sim_root: Path, robot: str):
     config.PRINT_SCENE_INFORMATION = False
     config.ENABLE_ELASTIC_BAND = True
 
-    from unitree_sdk2py.core.channel import ChannelFactoryInitialize  # type: ignore
+    from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber  # type: ignore
+    from unitree_sdk2py.idl.default import (  # type: ignore
+        unitree_go_msg_dds__SportModeState_,
+        unitree_hg_msg_dds__BmsState_,
+        unitree_hg_msg_dds__IMUState_,
+        unitree_hg_msg_dds__LowCmd_,
+        unitree_hg_msg_dds__LowState_,
+    )
+    from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_  # type: ignore
+    from unitree_sdk2py.idl.unitree_hg.msg.dds_ import BmsState_, IMUState_, LowCmd_, LowState_  # type: ignore
     from unitree_sdk2py_bridge import UnitreeSdk2Bridge  # type: ignore
 
-    return ChannelFactoryInitialize, UnitreeSdk2Bridge
+    return {
+        "ChannelFactoryInitialize": ChannelFactoryInitialize,
+        "ChannelPublisher": ChannelPublisher,
+        "ChannelSubscriber": ChannelSubscriber,
+        "UnitreeSdk2Bridge": UnitreeSdk2Bridge,
+        "LowCmd": LowCmd_,
+        "LowState": LowState_,
+        "SportModeState": SportModeState_,
+        "BmsState": BmsState_,
+        "IMUState": IMUState_,
+        "LowCmdDefault": unitree_hg_msg_dds__LowCmd_,
+        "LowStateDefault": unitree_hg_msg_dds__LowState_,
+        "SportModeStateDefault": unitree_go_msg_dds__SportModeState_,
+        "BmsStateDefault": unitree_hg_msg_dds__BmsState_,
+        "IMUStateDefault": unitree_hg_msg_dds__IMUState_,
+    }
+
+
+def quat_to_rpy_wxyz(q: Any) -> tuple[float, float, float]:
+    import math
+
+    qw, qx, qy, qz = [float(v) for v in q]
+    sinr_cosp = 2.0 * (qw * qx + qy * qz)
+    cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+    sinp = 2.0 * (qw * qy - qz * qx)
+    pitch = math.copysign(math.pi / 2.0, sinp) if abs(sinp) >= 1.0 else math.asin(sinp)
+    siny_cosp = 2.0 * (qw * qz + qx * qy)
+    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    return roll, pitch, yaw
+
+
+class UnitreeG1Bridge:
+    def __init__(self, model: Any, data: Any, mujoco: Any, sdk: dict[str, Any]):
+        import threading
+
+        self.model = model
+        self.data = data
+        self.mujoco = mujoco
+        self.num_motor = len(BODY_JOINT_NAMES)
+        self.body_qpos_adrs: list[int] = []
+        self.body_qvel_adrs: list[int] = []
+        self.body_actuator_ids: list[int] = []
+        for joint_name in BODY_JOINT_NAMES:
+            joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+            actuator_id = mujoco.mj_name2id(
+                model,
+                mujoco.mjtObj.mjOBJ_ACTUATOR,
+                joint_name.removesuffix("_joint"),
+            )
+            if joint_id < 0 or actuator_id < 0:
+                raise ValueError(f"Missing G1 body joint/actuator in scene: {joint_name}")
+            self.body_qpos_adrs.append(int(model.jnt_qposadr[joint_id]))
+            self.body_qvel_adrs.append(int(model.jnt_dofadr[joint_id]))
+            self.body_actuator_ids.append(actuator_id)
+
+        self.latest_cmd = sdk["LowCmdDefault"]()
+        self.received_cmd = False
+        self.cmd_lock = threading.Lock()
+        self.low_state = sdk["LowStateDefault"]()
+        self.low_state.mode_machine = 5
+
+        self.upstream = sdk["UnitreeSdk2Bridge"](model, data)
+        if hasattr(self.upstream.lowStateThread, "Stop"):
+            self.upstream.lowStateThread.Stop()
+        if hasattr(self.upstream.HighStateThread, "Stop"):
+            self.upstream.HighStateThread.Stop()
+        if hasattr(self.upstream.WirelessControllerThread, "Stop"):
+            self.upstream.WirelessControllerThread.Stop()
+        self.upstream.LowCmdHandler = self.low_cmd_handler
+        self.low_state_pub = self.upstream.low_state_puber
+        self.low_cmd_sub = self.upstream.low_cmd_suber
+
+        self.sport_state = sdk["SportModeStateDefault"]()
+        self.sport_state_pub = sdk["ChannelPublisher"]("rt/sportmodestate", sdk["SportModeState"])
+        self.sport_state_pub.Init()
+        self.secondary_imu = sdk["IMUStateDefault"]()
+        self.secondary_imu_pub = sdk["ChannelPublisher"]("rt/secondary_imu", sdk["IMUState"])
+        self.secondary_imu_pub.Init()
+        self.bms_state = sdk["BmsStateDefault"]()
+        self.bms_state.soc = 100
+        self.bms_pub = sdk["ChannelPublisher"]("rt/lf/bmsstate", sdk["BmsState"])
+        self.bms_pub.Init()
+        self.torso_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "torso_link")
+
+    def body_q(self):
+        import numpy as np
+
+        return np.asarray([self.data.qpos[adr] for adr in self.body_qpos_adrs], dtype=np.float64)
+
+    def body_dq(self):
+        import numpy as np
+
+        return np.asarray([self.data.qvel[adr] for adr in self.body_qvel_adrs], dtype=np.float64)
+
+    def body_tau_est(self):
+        import numpy as np
+
+        return np.asarray([self.data.actuator_force[i] for i in self.body_actuator_ids], dtype=np.float64)
+
+    def low_cmd_handler(self, msg: Any) -> None:
+        with self.cmd_lock:
+            self.latest_cmd = msg
+            self.received_cmd = True
+
+    def apply_control(self, precontrol_hold: bool) -> None:
+        q = self.body_q()
+        dq = self.body_dq()
+        self.data.ctrl[:] = 0.0
+        with self.cmd_lock:
+            cmd = self.latest_cmd
+            received = self.received_cmd
+        if received:
+            for i in range(self.num_motor):
+                motor = cmd.motor_cmd[i]
+                self.data.ctrl[self.body_actuator_ids[i]] = (
+                    motor.tau + motor.kp * (motor.q - q[i]) + motor.kd * (motor.dq - dq[i])
+                )
+        elif precontrol_hold:
+            for i in range(self.num_motor):
+                self.data.ctrl[self.body_actuator_ids[i]] = 40.0 * (DEFAULT_ANGLES[i] - q[i]) - 1.5 * dq[i]
+
+    def publish(self) -> None:
+        import numpy as np
+
+        body_q = self.body_q()
+        body_dq = self.body_dq()
+        body_tau = self.body_tau_est()
+        for i in range(self.num_motor):
+            self.low_state.motor_state[i].q = float(body_q[i])
+            self.low_state.motor_state[i].dq = float(body_dq[i])
+            self.low_state.motor_state[i].tau_est = float(body_tau[i])
+
+        base_quat = np.asarray(self.data.qpos[3:7], dtype=np.float64)
+        self.low_state.imu_state.quaternion[:] = [float(v) for v in base_quat]
+        self.low_state.imu_state.rpy[:] = list(quat_to_rpy_wxyz(base_quat))
+        self.low_state.imu_state.gyroscope[:] = [float(v) for v in self.data.qvel[3:6]]
+        self.low_state.imu_state.accelerometer[:] = [float(v) for v in self.data.qacc[0:3]]
+        self.low_state.tick = int(round(float(self.data.time) * 1000.0))
+        self.low_state_pub.Write(self.low_state)
+
+        self.sport_state.position[:] = [float(v) for v in self.data.qpos[0:3]]
+        self.sport_state.velocity[:] = [float(v) for v in self.data.qvel[0:3]]
+        self.sport_state_pub.Write(self.sport_state)
+        self.bms_pub.Write(self.bms_state)
+
+        if self.torso_body_id >= 0:
+            torso_quat = np.asarray(self.data.xquat[self.torso_body_id], dtype=np.float64)
+            torso_vel = np.zeros(6, dtype=np.float64)
+            self.mujoco.mj_objectVelocity(
+                self.model,
+                self.data,
+                self.mujoco.mjtObj.mjOBJ_BODY,
+                self.torso_body_id,
+                torso_vel,
+                1,
+            )
+            self.secondary_imu.quaternion[:] = [float(v) for v in torso_quat]
+            self.secondary_imu.rpy[:] = list(quat_to_rpy_wxyz(torso_quat))
+            self.secondary_imu.gyroscope[:] = [float(v) for v in torso_vel[0:3]]
+            self.secondary_imu.accelerometer[:] = [float(v) for v in self.data.qacc[0:3]]
+            self.secondary_imu_pub.Write(self.secondary_imu)
 
 
 def set_wireless_remote(low_state: Any, keys: int, lx: float, ly: float, rx: float, ry: float) -> None:
@@ -262,6 +433,8 @@ def open_logs(out_dir: Path, num_motor: int):
             "wall_time_s",
             "sim_time_s",
             "support_active",
+            "cmd_received",
+            "ctrl_rms",
             "wireless_keys",
             "base_z",
         ],
@@ -316,8 +489,8 @@ def main() -> int:
     }
     write_control(control_path, control)
 
-    ChannelFactoryInitialize, UnitreeSdk2Bridge = load_upstream_bridge(sim_root, args.robot)
-    ChannelFactoryInitialize(args.domain_id, args.interface)
+    sdk = load_upstream_bridge(sim_root, args.robot)
+    sdk["ChannelFactoryInitialize"](args.domain_id, args.interface)
 
     model = mujoco.MjModel.from_xml_path(str(scene))
     model.opt.timestep = args.dt
@@ -343,9 +516,7 @@ def main() -> int:
             f"root_z={init_summary['root_z']:.3f}",
             flush=True,
         )
-    bridge = UnitreeSdk2Bridge(model, data)
-    if hasattr(bridge.lowStateThread, "Stop"):
-        bridge.lowStateThread.Stop()
+    bridge = UnitreeG1Bridge(model, data, mujoco, sdk)
     support_root_qpos = data.qpos[:7].copy()
     support_root_qvel = data.qvel[:6].copy()
 
@@ -377,7 +548,10 @@ def main() -> int:
                 float(control.get("rx", 0.0)),
                 float(control.get("ry", 0.0)),
             )
-            bridge.PublishLowState()
+            bridge.publish()
+            ctrl_rms_before_hold = float((data.ctrl @ data.ctrl / max(1, data.ctrl.size)) ** 0.5)
+            if support_active and ctrl_rms_before_hold <= 1e-6:
+                bridge.apply_control(precontrol_hold=True)
 
             if support_active:
                 data.qpos[:7] = support_root_qpos
@@ -396,6 +570,8 @@ def main() -> int:
                     "wall_time_s": f"{now_wall:.6f}",
                     "sim_time_s": f"{data.time:.6f}",
                     "support_active": int(support_active),
+                    "cmd_received": int(bridge.received_cmd or ctrl_rms_before_hold > 1e-6),
+                    "ctrl_rms": f"{float((data.ctrl @ data.ctrl / max(1, data.ctrl.size)) ** 0.5):.6f}",
                     "wireless_keys": keys,
                     "base_z": f"{float(data.qpos[2]):.6f}",
                 })
@@ -415,12 +591,12 @@ def main() -> int:
     finally:
         status_f.close()
         lowcmd_f.close()
-        if hasattr(bridge.lowStateThread, "Stop"):
-            bridge.lowStateThread.Stop()
-        if hasattr(bridge.HighStateThread, "Stop"):
-            bridge.HighStateThread.Stop()
-        if hasattr(bridge.WirelessControllerThread, "Stop"):
-            bridge.WirelessControllerThread.Stop()
+        if hasattr(bridge.upstream.lowStateThread, "Stop"):
+            bridge.upstream.lowStateThread.Stop()
+        if hasattr(bridge.upstream.HighStateThread, "Stop"):
+            bridge.upstream.HighStateThread.Stop()
+        if hasattr(bridge.upstream.WirelessControllerThread, "Stop"):
+            bridge.upstream.WirelessControllerThread.Stop()
 
     (out_dir / "sim_bridge_summary.json").write_text(
         json.dumps({
