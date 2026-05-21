@@ -132,6 +132,7 @@ HARDWARE_FROM_SONIC_POLICY = [
     26,
     28,
 ]
+SONIC_BODY_PART_INDEXES = [0, 4, 10, 18, 5, 11, 19, 9, 16, 22, 28, 17, 23, 29]
 
 
 class SequenceEventLog:
@@ -1348,7 +1349,9 @@ def write_sonic_metadata_for_stock_reader(dst: Path) -> None:
     quat_count = body_quat_width // 4
     if body_count != quat_count:
         raise ValueError(f"{dst}: body_pos/body_quat body-count mismatch")
-    indexes = " ".join(str(i) for i in range(body_count))
+    if body_count != len(SONIC_BODY_PART_INDEXES):
+        raise ValueError(f"{dst}: body_pos has {body_count} bodies, expected stock SONIC 14-body subset")
+    indexes = " ".join(str(i) for i in SONIC_BODY_PART_INDEXES)
     (dst / "metadata.txt").write_text(
         "\n".join([
             f"Metadata for: {dst.name}",
@@ -1366,9 +1369,54 @@ def write_sonic_metadata_for_stock_reader(dst: Path) -> None:
             f"  body_quat_w: ({body_quat_rows}, {quat_count}, 4) (float64)",
             f"  body_lin_vel_w: ({body_lin_vel_rows}, {body_lin_vel_width // 3}, 3) (float64)",
             f"  body_ang_vel_w: ({body_ang_vel_rows}, {body_ang_vel_width // 3}, 3) (float64)",
+            f"  _body_indexes: ({len(SONIC_BODY_PART_INDEXES)},) (int64)",
             "",
         ])
     )
+
+
+def subset_sonic_body_csv(path: Path, coords_per_body: int) -> None:
+    with path.open(newline="") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        raise ValueError(f"{path}: empty CSV")
+    header = rows[0]
+    data_rows = rows[1:]
+    if not data_rows:
+        raise ValueError(f"{path}: no data rows")
+    width = min(len([value for value in row if value != ""]) for row in data_rows)
+    if width % coords_per_body != 0:
+        raise ValueError(f"{path}: width {width} is not divisible by {coords_per_body}")
+    body_count = width // coords_per_body
+    if body_count == len(SONIC_BODY_PART_INDEXES):
+        return
+    if max(SONIC_BODY_PART_INDEXES) >= body_count:
+        raise ValueError(f"{path}: has {body_count} bodies, cannot select SONIC body indexes")
+
+    selected_cols = [
+        body_idx * coords_per_body + coord
+        for body_idx in SONIC_BODY_PART_INDEXES
+        for coord in range(coords_per_body)
+    ]
+    out_rows = []
+    if len(header) >= width:
+        out_rows.append([header[col] for col in selected_cols])
+    else:
+        out_rows.append([f"value_{i}" for i in range(len(selected_cols))])
+    for row in data_rows:
+        values = [value for value in row if value != ""]
+        if len(values) < width:
+            raise ValueError(f"{path}: ragged row with {len(values)} values, expected at least {width}")
+        out_rows.append([values[col] for col in selected_cols])
+    with path.open("w", newline="") as f:
+        csv.writer(f).writerows(out_rows)
+
+
+def subset_sonic_body_csvs_for_stock_reader(dst: Path) -> None:
+    subset_sonic_body_csv(dst / "body_pos.csv", 3)
+    subset_sonic_body_csv(dst / "body_quat.csv", 4)
+    subset_sonic_body_csv(dst / "body_lin_vel.csv", 3)
+    subset_sonic_body_csv(dst / "body_ang_vel.csv", 3)
 
 
 def copy_sonic_single_motion(run_dir: Path, motion: str) -> Path:
@@ -1378,6 +1426,7 @@ def copy_sonic_single_motion(run_dir: Path, motion: str) -> Path:
     if dst.exists():
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
+    subset_sonic_body_csvs_for_stock_reader(dst)
     write_sonic_metadata_for_stock_reader(dst)
     return motion_root
 
@@ -1526,6 +1575,7 @@ def run_sonic_sequence(args: argparse.Namespace, run_dir: Path, control_file: Pa
             support_active=1,
             detail=marker,
         )
+        wait_for_pre_release_hold(run_dir, event_log)
         release_support(run_dir, control_file, event_log, "release simulator support after SONIC CONTROL")
         if args.sonic_post_release_wait_s > 0.0:
             time.sleep(args.sonic_post_release_wait_s)
