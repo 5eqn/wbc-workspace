@@ -56,7 +56,9 @@ Results will be reviewed by Claude Opus 4.6 and a human expert in embodied intel
 
 8. **Elastic-band/support release order is mandatory.** The robot must remain supported until the policy/controller has reached active `CONTROL`, then the elastic band/support must be released, and only after confirmed release may the benchmark start the acting motion/playback. Releasing before `CONTROL`, or starting motion before confirmed release, invalidates the run even if RMSE is low. Use `thirdparties/run-sonic/` only as read-only reference material for the proven no-fall release workflow and event-order checks.
 
-9. After `report.sh` completes, `artifacts/` must contain:
+9. **Use stock deploy paths, including HoloMotion v1.3.** HoloMotion must be the pre-existing `thirdparties/HoloMotion/` v1.3.0 checkout, and both SONIC and HoloMotion must run through their stock deployment/control paths inside Docker. Do not replace either policy with a benchmark-owned/self-implemented DDS policy runner. For HoloMotion, follow the v1.3 deployment documentation and launch/control graph, including the documented procedure for switching from the ready/default control state into motion tracking mode before playback.
+
+10. After `report.sh` completes, `artifacts/` must contain:
    - Proof that phase time = wall time = sim time
    - Mean joint RMSE < 0.2 for both policies, all 10 motions (or documented impossibility)
    - Tracking delay per policy per motion (should fall within -0.2s ~ 0.2s; positive preferred, prior estimate ~0.04s)
