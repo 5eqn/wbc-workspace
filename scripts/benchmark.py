@@ -33,6 +33,11 @@ MOTIONS = [
 
 POLICIES = ["sonic", "holomotion"]
 ROOT = Path(__file__).resolve().parents[1]
+RELEASE_EVENT_LOGS = ["sequence_events.csv", "holomotion_sequence_events.csv"]
+CONTROL_EVENT = "control_state_observed"
+RELEASE_REQUEST_EVENT = "release_file_touched"
+RELEASE_CONFIRMED_EVENT = "support_release_confirmed"
+PLAYBACK_EVENTS = ["sent_key_T", "motion_start_observed", "motion_playing_observed"]
 
 
 def read_csv_matrix(path: Path, skip_prefix_cols: int = 0) -> np.ndarray:
@@ -149,6 +154,79 @@ def expected_run_dir(logs: Path, policy: str, motion: str) -> Path:
     return logs / policy / motion
 
 
+def event_time(row: dict[str, str]) -> float:
+    value = row.get("monotonic_s") or row.get("wall_time_s") or row.get("sim_time_s")
+    if value in (None, ""):
+        raise ValueError("event row has no usable time column")
+    return float(value)
+
+
+def find_event_log(run_dir: Path) -> Path:
+    for name in RELEASE_EVENT_LOGS:
+        path = run_dir / name
+        if path.exists():
+            return path
+    names = ", ".join(RELEASE_EVENT_LOGS)
+    raise FileNotFoundError(f"{run_dir}: missing release-order event log ({names})")
+
+
+def load_events(run_dir: Path) -> list[dict[str, str]]:
+    path = find_event_log(run_dir)
+    with path.open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        raise ValueError(f"{path}: empty event log")
+    for row in rows:
+        row["_event_log"] = str(path)
+    return rows
+
+
+def first_event(events: list[dict[str, str]], event: str) -> dict[str, str]:
+    for row in events:
+        if row.get("event") == event:
+            return row
+    raise ValueError(f"missing event {event}")
+
+
+def validate_release_order(run_dir: Path) -> dict:
+    events = load_events(run_dir)
+    control = first_event(events, CONTROL_EVENT)
+    release_request = first_event(events, RELEASE_REQUEST_EVENT)
+    release_confirmed = first_event(events, RELEASE_CONFIRMED_EVENT)
+    playback = None
+    for row in events:
+        if row.get("event") in PLAYBACK_EVENTS:
+            playback = row
+            break
+    if playback is None:
+        raise ValueError(f"missing playback event ({', '.join(PLAYBACK_EVENTS)})")
+
+    control_t = event_time(control)
+    release_request_t = event_time(release_request)
+    release_confirmed_t = event_time(release_confirmed)
+    playback_t = event_time(playback)
+    if not control_t <= release_request_t <= release_confirmed_t <= playback_t:
+        raise ValueError(
+            "invalid release order: expected CONTROL <= release request <= "
+            "release confirmed <= playback"
+        )
+    support_active = str(release_confirmed.get("support_active", "")).strip()
+    if support_active not in {"0", "0.0", "false", "False"}:
+        raise ValueError(
+            "release confirmation did not show support_active=0 "
+            f"(got {support_active!r})"
+        )
+    return {
+        "passed_release_gate": True,
+        "event_log": release_confirmed.get("_event_log"),
+        "control_event_s": control_t,
+        "release_request_s": release_request_t,
+        "release_confirmed_s": release_confirmed_t,
+        "playback_event": playback.get("event"),
+        "playback_event_s": playback_t,
+    }
+
+
 def report(args: argparse.Namespace) -> int:
     logs = Path(args.logs)
     artifacts = Path(args.artifacts)
@@ -163,6 +241,7 @@ def report(args: argparse.Namespace) -> int:
                 ref, hz = load_reference(policy, motion)
                 t, q = load_tracked(run_dir)
                 metrics = aligned_rmse(ref, hz, t, q)
+                metrics.update(validate_release_order(run_dir))
                 metrics["passed_rmse_gate"] = metrics["mean_joint_rmse_rad"] < 0.2
                 row[policy] = metrics
                 if not metrics["passed_rmse_gate"]:
@@ -171,11 +250,22 @@ def report(args: argparse.Namespace) -> int:
                 row[policy] = {"error": str(exc), "passed_rmse_gate": False}
                 failures.append(f"{policy}/{motion}: {exc}")
         rows.append(row)
+    all_rmse_passed = all(
+        row[policy].get("passed_rmse_gate") is True
+        for row in rows
+        for policy in POLICIES
+    )
+    all_release_gates_passed = all(
+        row[policy].get("passed_release_gate") is True
+        for row in rows
+        for policy in POLICIES
+    )
     summary = {
         "motions": MOTIONS,
         "policies": POLICIES,
         "results": rows,
-        "all_rmse_passed": not failures,
+        "all_rmse_passed": all_rmse_passed,
+        "all_release_gates_passed": all_release_gates_passed,
         "failures": failures,
     }
     (artifacts / "metrics_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
@@ -187,8 +277,8 @@ def write_markdown(path: Path, summary: dict) -> None:
     lines = [
         "# WBC Benchmark Report",
         "",
-        "| Motion | SONIC RMSE | SONIC Delay | HoloMotion RMSE | HoloMotion Delay |",
-        "| --- | ---: | ---: | ---: | ---: |",
+        "| Motion | SONIC RMSE | SONIC Delay | SONIC Release | HoloMotion RMSE | HoloMotion Delay | HoloMotion Release |",
+        "| --- | ---: | ---: | :---: | ---: | ---: | :---: |",
     ]
     for row in summary["results"]:
         vals = []
@@ -197,9 +287,18 @@ def write_markdown(path: Path, summary: dict) -> None:
             vals.extend([
                 f"{item.get('mean_joint_rmse_rad', float('nan')):.4f}" if "mean_joint_rmse_rad" in item else "missing",
                 f"{item.get('tracking_delay_s', float('nan')):.3f}" if "tracking_delay_s" in item else "missing",
+                "pass" if item.get("passed_release_gate") else "fail",
             ])
-        lines.append(f"| {row['motion']} | {vals[0]} | {vals[1]} | {vals[2]} | {vals[3]} |")
-    lines.extend(["", f"All RMSE gates passed: `{summary['all_rmse_passed']}`", ""])
+        lines.append(
+            f"| {row['motion']} | {vals[0]} | {vals[1]} | {vals[2]} | "
+            f"{vals[3]} | {vals[4]} | {vals[5]} |"
+        )
+    lines.extend([
+        "",
+        f"All RMSE gates passed: `{summary['all_rmse_passed']}`",
+        f"All release-order gates passed: `{summary['all_release_gates_passed']}`",
+        "",
+    ])
     if summary["failures"]:
         lines.append("## Failures")
         lines.extend(f"- {failure}" for failure in summary["failures"])
