@@ -10,8 +10,11 @@ ENV onnxruntime_DIR=/opt/onnxruntime/lib/cmake/onnxruntime
 ENV PATH=/usr/local/cuda/bin:${PATH}
 ENV LD_LIBRARY_PATH=/opt/TensorRT/lib:/opt/onnxruntime/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl wget git sudo lsb-release software-properties-common tzdata build-essential cmake ninja-build clang pkg-config python3 python3-pip python3-venv python3-dev libyaml-cpp-dev libspdlog-dev libboost-all-dev libglfw3-dev libzmq3-dev libmsgpack-dev ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl wget git sudo lsb-release software-properties-common tzdata build-essential cmake ninja-build clang pkg-config python3 python3-pip python3-venv python3-dev libyaml-cpp-dev libspdlog-dev libboost-all-dev libglfw3-dev libzmq3-dev libmsgpack-dev ffmpeg git-lfs locales && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 COPY thirdparties/GR00T-WholeBodyControl /workspace/GR00T-WholeBodyControl
 COPY thirdparties/unitree_mujoco /workspace/unitree_mujoco
+WORKDIR /workspace/GR00T-WholeBodyControl/gear_sonic_deploy
+RUN bash scripts/install_deps.sh
+RUN bash scripts/install_ros2_humble.sh
