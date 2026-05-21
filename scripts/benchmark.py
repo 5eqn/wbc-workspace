@@ -958,6 +958,73 @@ def smoke_sim_bridge(_: argparse.Namespace) -> int:
     return 0 if payload["ok"] else 1
 
 
+def smoke_sim_release(_: argparse.Namespace) -> int:
+    script = (
+        "rm -rf /tmp/wbc-sim-release && mkdir -p /tmp/wbc-sim-release && "
+        "python3 /workspace/wbc/scripts/sim_bridge.py "
+        "--sim-root /workspace/unitree_mujoco "
+        "--robot g1 "
+        "--interface lo "
+        "--duration-s 0.8 "
+        "--dt 0.005 "
+        "--log-hz 50 "
+        "--out-dir /tmp/wbc-sim-release "
+        "--control-file /tmp/wbc-sim-release/control.json & "
+        "pid=$! && "
+        "for i in $(seq 1 100); do test -s /tmp/wbc-sim-release/control.json && break; sleep 0.02; done && "
+        "python3 - <<'PY'\n"
+        "import csv, json, time\n"
+        "from pathlib import Path\n"
+        "path = Path('/tmp/wbc-sim-release/control.json')\n"
+        "data = json.loads(path.read_text())\n"
+        "assert data['support_active'] is True\n"
+        "status = Path('/tmp/wbc-sim-release/simulator_status.csv')\n"
+        "for _ in range(100):\n"
+        "    if status.exists():\n"
+        "        rows = list(csv.DictReader(status.open()))\n"
+        "        if any(row.get('support_active') == '1' for row in rows):\n"
+        "            break\n"
+        "    time.sleep(0.02)\n"
+        "else:\n"
+        "    raise AssertionError('simulator did not log support_active=1 before release')\n"
+        "data['support_active'] = False\n"
+        "path.write_text(json.dumps(data, indent=2) + '\\n')\n"
+        "PY\n"
+        "wait $pid && "
+        "python3 - <<'PY'\n"
+        "import csv\n"
+        "from pathlib import Path\n"
+        "rows = list(csv.DictReader(Path('/tmp/wbc-sim-release/simulator_status.csv').open()))\n"
+        "values = [row['support_active'] for row in rows]\n"
+        "assert '1' in values, values\n"
+        "assert '0' in values, values\n"
+        "first_zero = values.index('0')\n"
+        "assert all(v == '0' for v in values[first_zero:]), values\n"
+        "PY"
+    )
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "-v",
+        f"{ROOT}:/workspace/wbc",
+        "wbc-unitree_mujoco",
+        "bash",
+        "-lc",
+        script,
+    ]
+    proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    payload = {
+        "ok": proc.returncode == 0,
+        "image": "wbc-unitree_mujoco",
+        "returncode": proc.returncode,
+        "stdout": proc.stdout.strip(),
+        "stderr": proc.stderr.strip(),
+    }
+    print(json.dumps(payload, indent=2))
+    return 0 if payload["ok"] else 1
+
+
 def docker(args: argparse.Namespace) -> int:
     image = f"wbc-{args.image}"
     dockerfile = ROOT / "docker" / f"{args.image}.Dockerfile"
@@ -975,6 +1042,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     sub.add_parser("validate-images").set_defaults(func=validate_images)
     sub.add_parser("smoke-release-gate").set_defaults(func=smoke_release_gate)
     sub.add_parser("smoke-sim-bridge").set_defaults(func=smoke_sim_bridge)
+    sub.add_parser("smoke-sim-release").set_defaults(func=smoke_sim_release)
     sub.add_parser("smoke-holomotion").set_defaults(func=smoke_holomotion)
     sub.add_parser("smoke-sonic-build").set_defaults(func=smoke_sonic_build)
     p = sub.add_parser("report")

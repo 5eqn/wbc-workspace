@@ -188,6 +188,8 @@ def main() -> int:
                     row[f"measured_dq_{i}"] = f"{float(data.sensordata[i + model.nu]):.9f}"
                     row[f"tau_est_{i}"] = f"{float(data.sensordata[i + 2 * model.nu]):.9f}"
                 lowcmd_writer.writerow(row)
+                status_f.flush()
+                lowcmd_f.flush()
                 next_log_t += log_dt
 
             sleep_s = args.dt - (time.monotonic() - started_mono - elapsed)
