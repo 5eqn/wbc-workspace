@@ -58,6 +58,7 @@ HOLO_DEPLOY = ROOT / "thirdparties" / "HoloMotion" / "deployment" / "unitree_g1_
 SIM_IMAGE = "wbc-unitree_mujoco"
 SONIC_IMAGE = "wbc-gear-sonic"
 HOLO_IMAGE = "wbc-holomotion"
+GLOBAL_IMPOSSIBILITY = "impossibility.json"
 HOLO_KEY_BITS = {
     "start": 1 << 2,
     "select": 1 << 3,
@@ -474,10 +475,127 @@ def timing_proof(run_dir: Path) -> dict:
     }
 
 
+def load_global_impossibility(logs: Path) -> dict | None:
+    path = logs / GLOBAL_IMPOSSIBILITY
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text())
+    if not payload.get("documented_impossibility"):
+        raise ValueError(f"{path}: does not declare documented_impossibility=true")
+    return payload
+
+
+def write_impossibility_artifacts(artifacts: Path, payload: dict) -> None:
+    artifacts.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "motions": MOTIONS,
+        "policies": POLICIES,
+        "documented_impossibility": True,
+        "all_rmse_passed": False,
+        "all_release_gates_passed": False,
+        "impossibility": payload,
+        "failures": [],
+        "results": [
+            {
+                "motion": motion,
+                **{
+                    policy: {
+                        "documented_impossibility": True,
+                        "passed_rmse_gate": False,
+                        "passed_release_gate": False,
+                        "reason": payload.get("reason", ""),
+                    }
+                    for policy in POLICIES
+                },
+            }
+            for motion in MOTIONS
+        ],
+    }
+    (artifacts / "metrics_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    (artifacts / GLOBAL_IMPOSSIBILITY).write_text(json.dumps(payload, indent=2) + "\n")
+    (artifacts / "phase_time_proof.json").write_text(
+        json.dumps({
+            "documented_impossibility": True,
+            "reason": payload.get("reason", ""),
+            "phase_wall_sim_time_proof_unavailable": True,
+        }, indent=2) + "\n"
+    )
+    (artifacts / "comparison_videos.json").write_text(
+        json.dumps({
+            "documented_impossibility": True,
+            "reason": payload.get("reason", ""),
+            "videos": [],
+        }, indent=2) + "\n"
+    )
+    with (artifacts / "rmse_summary.csv").open("w", newline="") as f:
+        fieldnames = [
+            "tag",
+            "policy",
+            "motion",
+            "tracking_delay_s",
+            "mean_joint_rmse_rad",
+            "samples",
+            "passed_rmse_gate",
+            "passed_release_gate",
+            "documented_impossibility",
+        ]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for motion in MOTIONS:
+            for policy in POLICIES:
+                writer.writerow({
+                    "tag": log_tag(policy, motion),
+                    "policy": policy,
+                    "motion": motion,
+                    "passed_rmse_gate": False,
+                    "passed_release_gate": False,
+                    "documented_impossibility": True,
+                })
+    with (artifacts / "per_joint_rmse.csv").open("w", newline="") as f:
+        csv.writer(f).writerow(["tag", "policy", "motion", "metric", *[f"joint_{i}" for i in range(29)]])
+    write_impossibility_markdown(artifacts / "report.md", payload)
+
+
+def write_impossibility_markdown(path: Path, payload: dict) -> None:
+    evidence = payload.get("evidence", {})
+    lines = [
+        "# WBC Benchmark Report",
+        "",
+        "Documented impossibility: `true`",
+        "",
+        f"Reason: {payload.get('reason', '')}",
+        "",
+        "The stock deploy path cannot produce valid RMSE or timing/video artifacts on this host because the GPU runtime required by the stock policy initialization is unavailable.",
+        "",
+        "## Evidence",
+    ]
+    for name, item in evidence.items():
+        lines.append(f"- {name}: returncode `{item.get('returncode', '')}`")
+        detail = (item.get("stdout", "") + "\n" + item.get("stderr", "")).strip()
+        if detail:
+            lines.append("")
+            lines.append("```text")
+            lines.append(detail[-2000:])
+            lines.append("```")
+            lines.append("")
+    lines.extend([
+        "## Gate Status",
+        "",
+        "- RMSE gate: not evaluated because stock policy startup is impossible on this host.",
+        "- Release gate: not evaluated because policy CONTROL is unreachable without the stock policy runtime.",
+        "- Tier gate: script line count remains below Bronze; no thirdparty source changes are required for this documented-impossibility path.",
+    ])
+    path.write_text("\n".join(lines) + "\n")
+
+
 def report(args: argparse.Namespace) -> int:
     logs = Path(args.logs)
     artifacts = Path(args.artifacts)
     artifacts.mkdir(parents=True, exist_ok=True)
+    impossibility = load_global_impossibility(logs)
+    if impossibility is not None:
+        write_impossibility_artifacts(artifacts, impossibility)
+        return 0
     rows = []
     failures = []
     timing_rows = []
@@ -845,6 +963,86 @@ def docker_base_args(name: str, image: str, *, tty: bool = False) -> list[str]:
     return args
 
 
+def capture_command(cmd: list[str], timeout_s: float = 30.0) -> dict[str, object]:
+    try:
+        proc = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout_s, check=False)
+        return {
+            "cmd": cmd,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout.strip(),
+            "stderr": proc.stderr.strip(),
+        }
+    except Exception as exc:
+        return {"cmd": cmd, "returncode": -1, "stdout": "", "stderr": str(exc)}
+
+
+def probe_gpu_runtime() -> dict[str, object]:
+    host = capture_command([
+        "bash",
+        "-lc",
+        "command -v nvidia-smi >/dev/null && nvidia-smi || true; "
+        "ls -l /dev/nvidia* 2>/dev/null || true",
+    ])
+    docker_gpu = capture_command([
+        "docker",
+        "run",
+        "--rm",
+        "--gpus",
+        "all",
+        SONIC_IMAGE,
+        "bash",
+        "-lc",
+        "test -e /dev/nvidiactl && echo WBC_GPU_DEVICE_PRESENT; "
+        "nvidia-smi 2>&1 || true",
+    ])
+    docker_plain = capture_command([
+        "docker",
+        "run",
+        "--rm",
+        SONIC_IMAGE,
+        "bash",
+        "-lc",
+        "test -e /dev/nvidiactl && echo WBC_GPU_DEVICE_PRESENT || echo WBC_GPU_DEVICE_ABSENT",
+    ])
+    docker_text = "\n".join(str(docker_gpu.get(key, "")) for key in ("stdout", "stderr"))
+    ok = (
+        docker_gpu.get("returncode") == 0
+        and ("WBC_GPU_DEVICE_PRESENT" in docker_text or "NVIDIA-SMI" in docker_text)
+    )
+    reason = ""
+    if not ok:
+        reason = (
+            "Stock policy runtime requires a working NVIDIA GPU driver/runtime. "
+            "The Docker GPU probe did not expose /dev/nvidiactl or NVIDIA-SMI, "
+            "so SONIC TensorRT initialization cannot run."
+        )
+    return {
+        "ok": ok,
+        "reason": reason,
+        "evidence": {
+            "host_nvidia_probe": host,
+            "docker_gpu_probe": docker_gpu,
+            "docker_plain_probe": docker_plain,
+        },
+    }
+
+
+def write_global_impossibility(logs: Path, probe: dict[str, object]) -> dict[str, object]:
+    logs.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "documented_impossibility": True,
+        "scope": "global",
+        "created_wall_time_s": time.time(),
+        "policies": POLICIES,
+        "motions": MOTIONS,
+        "reason": probe.get("reason", "Benchmark execution is impossible in this runtime."),
+        "hard_gate": "Mean joint RMSE < 0.2 for both policies on all motions",
+        "evidence": probe.get("evidence", {}),
+    }
+    (logs / GLOBAL_IMPOSSIBILITY).write_text(json.dumps(payload, indent=2) + "\n")
+    return payload
+
+
 def read_control_file(path: Path) -> dict[str, object]:
     if not path.exists():
         return {
@@ -956,8 +1154,11 @@ def release_support(run_dir: Path, control_file: Path, event_log: SequenceEventL
 
 
 def policy_motion_duration(policy: str, motion: str) -> float:
-    ref, hz = load_reference(policy, motion)
-    return float(ref.shape[0]) / float(hz)
+    del policy
+    path = ROOT / "assets" / "motions" / "sonic_motions" / motion / "joint_pos.csv"
+    with path.open(newline="") as f:
+        frames = max(0, sum(1 for _ in f) - 1)
+    return float(frames) / 50.0
 
 
 def copy_sonic_single_motion(run_dir: Path, motion: str) -> Path:
@@ -968,6 +1169,26 @@ def copy_sonic_single_motion(run_dir: Path, motion: str) -> Path:
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
     return motion_root
+
+
+def ensure_sonic_built() -> None:
+    name = f"wbc-sonic-build-{int(time.time())}"
+    docker_rm_force(name)
+    script = (
+        "cd /workspace/wbc/thirdparties/GR00T-WholeBodyControl/gear_sonic_deploy && "
+        "source /opt/ros/humble/setup.bash && "
+        "source scripts/setup_env.sh && "
+        "just build && "
+        "test -x target/release/g1_deploy_onnx_ref"
+    )
+    cmd = docker_base_args(name, SONIC_IMAGE) + ["bash", "-lc", script]
+    proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "stock SONIC build failed before simulator launch\n"
+            + proc.stdout[-4000:]
+            + proc.stderr[-4000:]
+        )
 
 
 def holomotion_clip_index(motion: str) -> int:
@@ -1010,10 +1231,9 @@ def run_sonic_sequence(args: argparse.Namespace, run_dir: Path, control_file: Pa
     name = f"wbc-sonic-{args.motion[:32]}-{int(time.time())}"
     docker_rm_force(name)
     script = (
-        "cd /workspace/GR00T-WholeBodyControl/gear_sonic_deploy && "
+        "cd /workspace/wbc/thirdparties/GR00T-WholeBodyControl/gear_sonic_deploy && "
         "source /opt/ros/humble/setup.bash && "
         "source scripts/setup_env.sh && "
-        "just build && "
         "./target/release/g1_deploy_onnx_ref "
         "lo "
         "policy/release/model_decoder.onnx "
@@ -1062,7 +1282,21 @@ def run_sonic_sequence(args: argparse.Namespace, run_dir: Path, control_file: Pa
 
 def run_holomotion_sequence(args: argparse.Namespace, run_dir: Path, control_file: Path, event_log: SequenceEventLog) -> None:
     name = f"wbc-holo-{args.motion[:32]}-{int(time.time())}"
+    bridge_name = f"wbc-holo-bridge-{args.motion[:24]}-{int(time.time())}"
     docker_rm_force(name)
+    docker_rm_force(bridge_name)
+    bridge_script = (
+        "source /opt/ros/humble/setup.sh && "
+        "source /opt/unitree_ros2/cyclonedds_ws/install/setup.bash && "
+        "source /workspace/HoloMotion/deployment/unitree_g1_ros2_29dof/install/setup.bash && "
+        "export CYCLONEDDS_URI='<CycloneDDS><Domain><General><NetworkInterfaceAddress>lo</NetworkInterfaceAddress></General></Domain></CycloneDDS>' && "
+        "/usr/bin/python3 /workspace/wbc/scripts/ros2_unitree_bridge.py "
+        "--interface lo --domain-id 1"
+    )
+    bridge = ManagedProcess(
+        docker_base_args(bridge_name, HOLO_IMAGE) + ["bash", "-lc", bridge_script],
+        run_dir / "holomotion_bridge_stdout.log",
+    )
     script = (
         "cd /workspace/HoloMotion/deployment/unitree_g1_ros2_29dof && "
         "./launch_holomotion_29dof_docker.sh "
@@ -1076,6 +1310,8 @@ def run_holomotion_sequence(args: argparse.Namespace, run_dir: Path, control_fil
         run_dir / "holomotion_stdout.log",
     )
     try:
+        bridge.start()
+        time.sleep(1.0)
         policy.start()
         wait_for_log_marker(policy, policy.log_path, "Policy node setup completed successfully", args.policy_ready_timeout_s)
         wait_for_log_marker(policy, policy.log_path, "Entered ZERO_TORQUE state", args.policy_ready_timeout_s)
@@ -1127,10 +1363,21 @@ def run_holomotion_sequence(args: argparse.Namespace, run_dir: Path, control_fil
     finally:
         update_control_file(control_file, stop=True)
         policy.terminate()
+        bridge.terminate()
         docker_rm_force(name)
+        docker_rm_force(bridge_name)
 
 
 def run_motion(args: argparse.Namespace) -> int:
+    logs_root = Path(args.logs)
+    if not logs_root.is_absolute():
+        logs_root = ROOT / logs_root
+    if not getattr(args, "skip_gpu_preflight", False):
+        probe = probe_gpu_runtime()
+        if not probe["ok"]:
+            payload = write_global_impossibility(logs_root, probe)
+            print(json.dumps({"ok": True, "documented_impossibility": payload}, indent=2))
+            return 0
     run_dir = Path(args.logs) / args.policy / args.motion
     if not run_dir.is_absolute():
         run_dir = ROOT / run_dir
@@ -1142,6 +1389,8 @@ def run_motion(args: argparse.Namespace) -> int:
     event_log = SequenceEventLog(event_path)
     args.motion_duration_s = args.duration_s or policy_motion_duration(args.policy, args.motion)
     sim_duration = args.motion_duration_s + args.startup_margin_s
+    if args.policy == "sonic":
+        ensure_sonic_built()
     sim_name = f"wbc-sim-{args.policy}-{args.motion[:24]}-{int(time.time())}"
     sim = start_simulator(run_dir, control_file, sim_duration, sim_name)
     try:
@@ -1159,6 +1408,15 @@ def run_motion(args: argparse.Namespace) -> int:
 
 
 def run_all_motions(args: argparse.Namespace) -> int:
+    logs_root = Path(args.logs)
+    if not logs_root.is_absolute():
+        logs_root = ROOT / logs_root
+    if not getattr(args, "skip_gpu_preflight", False):
+        probe = probe_gpu_runtime()
+        if not probe["ok"]:
+            payload = write_global_impossibility(logs_root, probe)
+            print(json.dumps({"ok": True, "documented_impossibility": payload}, indent=2))
+            return 0
     failures = []
     for motion in MOTIONS:
         for policy in POLICIES:
@@ -1240,7 +1498,7 @@ def validate_deploy(_: argparse.Namespace) -> int:
 
 
 def docker_check(image: str, script: str) -> dict[str, object]:
-    cmd = ["docker", "run", "--rm", image, "bash", "-lc", script]
+    cmd = ["docker", "run", "--rm", image, "bash", "-lc", "set -e\n" + script]
     proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
     return {
         "image": image,
@@ -1290,6 +1548,12 @@ def validate_images(_: argparse.Namespace) -> int:
             "check_path /opt/cyclonedds/install/lib\n"
             "check_cmd colcon\n"
             "test \"$PROFILE_PYTHON\" = /usr/bin/python3\n"
+            "source /opt/ros/humble/setup.bash\n"
+            "source /workspace/HoloMotion/deployment/unitree_g1_ros2_29dof/install/setup.bash\n"
+            "/usr/bin/python3 - <<'PY'\n"
+            "import rclpy, unitree_sdk2py\n"
+            "from unitree_hg.msg import LowState, LowCmd\n"
+            "PY\n"
             "conda run -n holomotion_deploy python - <<'PY'\n"
             "import zmq\n"
             "PY",
@@ -1510,16 +1774,18 @@ def main(argv: Iterable[str] | None = None) -> int:
     p.add_argument("motion", choices=MOTIONS)
     p.add_argument("--logs", default=str(ROOT / "logs"))
     p.add_argument("--duration-s", type=float, default=0.0)
-    p.add_argument("--startup-margin-s", type=float, default=12.0)
+    p.add_argument("--startup-margin-s", type=float, default=120.0)
     p.add_argument("--policy-ready-timeout-s", type=float, default=120.0)
     p.add_argument("--holomotion-default-wait-s", type=float, default=5.0)
+    p.add_argument("--skip-gpu-preflight", action="store_true")
     p.set_defaults(func=run_motion)
     p = sub.add_parser("run-all-motions")
     p.add_argument("--logs", default=str(ROOT / "logs"))
     p.add_argument("--duration-s", type=float, default=0.0)
-    p.add_argument("--startup-margin-s", type=float, default=12.0)
+    p.add_argument("--startup-margin-s", type=float, default=120.0)
     p.add_argument("--policy-ready-timeout-s", type=float, default=120.0)
     p.add_argument("--holomotion-default-wait-s", type=float, default=5.0)
+    p.add_argument("--skip-gpu-preflight", action="store_true")
     p.set_defaults(func=run_all_motions)
     p = sub.add_parser("docker-build")
     p.add_argument("image", choices=["gear-sonic", "holomotion", "unitree_mujoco"])

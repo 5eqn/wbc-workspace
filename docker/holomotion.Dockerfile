@@ -5,7 +5,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
 ENV CUDA_HOME=/usr/local/cuda
 ENV PATH=/opt/conda/bin:/usr/local/cuda/bin:${PATH}
-ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+ENV CYCLONEDDS_HOME=/opt/cyclonedds/install
+ENV CMAKE_PREFIX_PATH=/opt/cyclonedds/install:${CMAKE_PREFIX_PATH}
+ENV LD_LIBRARY_PATH=/opt/cyclonedds/install/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl wget git sudo lsb-release software-properties-common tzdata build-essential cmake ninja-build python3 python3-pip python3-venv python3-dev libyaml-cpp-dev libspdlog-dev libboost-all-dev libglfw3-dev libzmq3-dev ffmpeg locales gnupg && rm -rf /var/lib/apt/lists/*
 RUN locale-gen en_US en_US.UTF-8 && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
@@ -24,4 +26,6 @@ RUN cd /opt/unitree_ros2/cyclonedds_ws && PATH=/usr/local/cuda/bin:/usr/local/sb
 RUN cmake -S /workspace/HoloMotion/thirdparties/cyclonedds -B /tmp/cyclonedds-build -DCMAKE_INSTALL_PREFIX=/opt/cyclonedds/install -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF && cmake --build /tmp/cyclonedds-build --target install && rm -rf /tmp/cyclonedds-build
 RUN apt-get update && apt-get install -y --no-install-recommends python3-yaml && rm -rf /var/lib/apt/lists/*
 RUN cd /workspace/HoloMotion/deployment/unitree_g1_ros2_29dof && PATH=/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/conda/bin bash -lc "source /opt/ros/humble/setup.bash && source /opt/unitree_ros2/cyclonedds_ws/install/setup.bash && colcon build"
+COPY thirdparties/GR00T-WholeBodyControl/external_dependencies/unitree_sdk2_python /workspace/unitree_sdk2_python
+RUN /usr/bin/python3 -m pip install --no-cache-dir -e /workspace/unitree_sdk2_python
 ENV PROFILE_PYTHON=/usr/bin/python3

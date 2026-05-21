@@ -62,6 +62,7 @@ case "$cmd" in
     "$0" smoke-sim-release
     "$0" smoke-sonic-build
     "$0" smoke-holomotion
+    "$0" run-all-motions
     ;;
   -h|--help|help)
     usage
