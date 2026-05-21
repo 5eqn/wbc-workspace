@@ -70,6 +70,68 @@ HOLO_KEY_BITS = {
     "down": 1 << 14,
     "left": 1 << 15,
 }
+SONIC_POLICY_FROM_HARDWARE = [
+    0,
+    6,
+    12,
+    1,
+    7,
+    13,
+    2,
+    8,
+    14,
+    3,
+    9,
+    15,
+    22,
+    4,
+    10,
+    16,
+    23,
+    5,
+    11,
+    17,
+    24,
+    18,
+    25,
+    19,
+    26,
+    20,
+    27,
+    21,
+    28,
+]
+HARDWARE_FROM_SONIC_POLICY = [
+    0,
+    3,
+    6,
+    9,
+    13,
+    17,
+    1,
+    4,
+    7,
+    10,
+    14,
+    18,
+    2,
+    5,
+    8,
+    11,
+    15,
+    19,
+    21,
+    23,
+    25,
+    27,
+    12,
+    16,
+    20,
+    22,
+    24,
+    26,
+    28,
+]
 
 
 class SequenceEventLog:
@@ -144,7 +206,7 @@ def load_reference(policy: str, motion: str) -> tuple[np.ndarray, float]:
 
     if policy == "sonic":
         q = read_csv_matrix(ROOT / "assets" / "motions" / "sonic_motions" / motion / "joint_pos.csv")
-        return q[:, :29], 50.0
+        return q[:, HARDWARE_FROM_SONIC_POLICY], 50.0
     path = ROOT / "assets" / "motions" / "holomotion_motions" / f"{motion}_holomotion.npz"
     data = np.load(path)
     for key in ("ref_dof_pos", "dof_pos"):
@@ -1295,7 +1357,25 @@ def holomotion_clip_index(motion: str) -> int:
     return clips.index(target)
 
 
-def start_simulator(run_dir: Path, control_file: Path, duration_s: float, name: str) -> ManagedProcess:
+def simulator_reference_args(policy: str, motion: str) -> list[str]:
+    if policy == "sonic":
+        reference = ROOT / "assets" / "motions" / "sonic_motions" / motion
+        return [
+            "--init-reference",
+            f"/workspace/wbc/{reference.relative_to(ROOT)}",
+            "--init-reference-format",
+            "sonic_csv",
+        ]
+    reference = ROOT / "assets" / "motions" / "holomotion_motions" / f"{motion}_holomotion.npz"
+    return [
+        "--init-reference",
+        f"/workspace/wbc/{reference.relative_to(ROOT)}",
+        "--init-reference-format",
+        "holomotion_npz",
+    ]
+
+
+def start_simulator(run_dir: Path, control_file: Path, duration_s: float, name: str, policy: str, motion: str) -> ManagedProcess:
     docker_rm_force(name)
     cmd = docker_base_args(name, SIM_IMAGE) + [
         "python3",
@@ -1316,7 +1396,7 @@ def start_simulator(run_dir: Path, control_file: Path, duration_s: float, name: 
         f"/workspace/wbc/{run_dir.relative_to(ROOT)}",
         "--control-file",
         f"/workspace/wbc/{control_file.relative_to(ROOT)}",
-    ]
+    ] + simulator_reference_args(policy, motion)
     proc = ManagedProcess(cmd, run_dir / "simulator_stdout.log")
     proc.start()
     wait_for_file(control_file, 10.0)
@@ -1489,7 +1569,7 @@ def run_motion(args: argparse.Namespace) -> int:
     if args.policy == "sonic":
         ensure_sonic_built()
     sim_name = f"wbc-sim-{args.policy}-{args.motion[:24]}-{int(time.time())}"
-    sim = start_simulator(run_dir, control_file, sim_duration, sim_name)
+    sim = start_simulator(run_dir, control_file, sim_duration, sim_name, args.policy, args.motion)
     try:
         if args.policy == "sonic":
             run_sonic_sequence(args, run_dir, control_file, event_log)
