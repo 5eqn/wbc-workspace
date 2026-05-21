@@ -428,6 +428,56 @@ def validate_deploy(_: argparse.Namespace) -> int:
     return 0 if not failures else 1
 
 
+def docker_check(image: str, script: str) -> dict[str, object]:
+    cmd = ["docker", "run", "--rm", image, "bash", "-lc", script]
+    proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    return {
+        "image": image,
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "stdout": proc.stdout.strip(),
+        "stderr": proc.stderr.strip(),
+    }
+
+
+def validate_images(_: argparse.Namespace) -> int:
+    checks = [
+        docker_check(
+            "wbc-unitree_mujoco",
+            "python3 - <<'PY'\n"
+            "import imageio, mujoco, numpy, scipy\n"
+            "from pathlib import Path\n"
+            "assert Path('/workspace/unitree_mujoco/simulate').exists()\n"
+            "PY\n"
+            "command -v ffmpeg >/dev/null",
+        ),
+        docker_check(
+            "wbc-gear-sonic",
+            "check_path() { test -e \"$1\" || { echo \"missing: $1\"; exit 1; }; }\n"
+            "check_cmd() { command -v \"$1\" >/dev/null || { echo \"missing command: $1\"; exit 1; }; }\n"
+            "check_path /workspace/GR00T-WholeBodyControl/gear_sonic_deploy/deploy.sh\n"
+            "check_path /opt/ros/humble/setup.bash\n"
+            "check_path /opt/onnxruntime/lib\n"
+            "check_cmd colcon",
+        ),
+        docker_check(
+            "wbc-holomotion",
+            "check_path() { test -e \"$1\" || { echo \"missing: $1\"; exit 1; }; }\n"
+            "check_cmd() { command -v \"$1\" >/dev/null || { echo \"missing command: $1\"; exit 1; }; }\n"
+            "check_path /workspace/HoloMotion/deployment/unitree_g1_ros2_29dof/launch_holomotion_29dof_docker.sh\n"
+            "check_path /opt/conda/etc/profile.d/conda.sh\n"
+            "check_path /opt/conda/envs/holomotion_deploy\n"
+            "check_path /opt/ros/humble/setup.sh\n"
+            "check_path /opt/unitree_ros2/setup.sh\n"
+            "check_path /opt/cyclonedds/install/lib\n"
+            "check_cmd colcon",
+        ),
+    ]
+    failures = [item for item in checks if not item["ok"]]
+    print(json.dumps({"ok": not failures, "checks": checks}, indent=2))
+    return 0 if not failures else 1
+
+
 def docker(args: argparse.Namespace) -> int:
     image = f"wbc-{args.image}"
     dockerfile = ROOT / "docker" / f"{args.image}.Dockerfile"
@@ -442,6 +492,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     sub.add_parser("validate-assets").set_defaults(func=validate_assets)
     sub.add_parser("prepare-assets").set_defaults(func=prepare_stock_assets)
     sub.add_parser("validate-deploy").set_defaults(func=validate_deploy)
+    sub.add_parser("validate-images").set_defaults(func=validate_images)
     p = sub.add_parser("report")
     p.add_argument("--logs", default=str(ROOT / "logs"))
     p.add_argument("--artifacts", default=str(ROOT / "artifacts"))
