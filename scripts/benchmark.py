@@ -834,6 +834,11 @@ def docker_rm_force(name: str) -> None:
 
 def docker_base_args(name: str, image: str, *, tty: bool = False) -> list[str]:
     args = ["docker", "run", "--rm", "--name", name, "--network", "host"]
+    gpu_request = os.environ.get("WBC_DOCKER_GPUS")
+    if gpu_request is None and image in {SONIC_IMAGE, HOLO_IMAGE} and shutil.which("nvidia-smi"):
+        gpu_request = "all"
+    if gpu_request:
+        args.extend(["--gpus", gpu_request])
     if tty:
         args.extend(["-i", "-t"])
     args.extend(["-v", f"{ROOT}:/workspace/wbc", image])
@@ -1007,12 +1012,17 @@ def run_sonic_sequence(args: argparse.Namespace, run_dir: Path, control_file: Pa
     script = (
         "cd /workspace/GR00T-WholeBodyControl/gear_sonic_deploy && "
         "source /opt/ros/humble/setup.bash && "
-        "./deploy.sh "
-        "--planner '' "
-        f"--motion-data /workspace/wbc/{motion_root.relative_to(ROOT)} "
+        "source scripts/setup_env.sh && "
+        "just build && "
+        "./target/release/g1_deploy_onnx_ref "
+        "lo "
+        "policy/release/model_decoder.onnx "
+        f"/workspace/wbc/{motion_root.relative_to(ROOT)} "
+        "--obs-config policy/release/observation_config.yaml "
+        "--encoder-file policy/release/model_encoder.onnx "
         "--input-type keyboard "
         "--output-type all "
-        "sim"
+        "--disable-crc-check"
     )
     policy = ManagedProcess(
         docker_base_args(name, SONIC_IMAGE, tty=True) + ["bash", "-lc", script],
@@ -1021,9 +1031,6 @@ def run_sonic_sequence(args: argparse.Namespace, run_dir: Path, control_file: Pa
     )
     try:
         policy.start()
-        with contextlib.suppress(Exception):
-            wait_for_log_marker(policy, policy.log_path, "Proceed with deployment?", 20.0)
-        policy.send("\n")
         wait_for_log_marker(policy, policy.log_path, "Init Done", args.policy_ready_timeout_s)
         policy.send("]")
         marker = wait_for_log_marker(

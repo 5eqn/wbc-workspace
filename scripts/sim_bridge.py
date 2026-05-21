@@ -68,6 +68,7 @@ def read_control(path: Path, previous: dict[str, Any]) -> dict[str, Any]:
 def write_control(path: Path, control: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(control, indent=2) + "\n")
+    path.chmod(0o666)
 
 
 def open_logs(out_dir: Path, num_motor: int):
