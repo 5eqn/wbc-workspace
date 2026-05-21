@@ -3,7 +3,7 @@
 
 This script is benchmark-owned glue, kept flat under scripts/. It reuses the
 upstream Unitree MuJoCo Python bridge for DDS LowState/LowCmd transport and
-adds only headless stepping, root elastic-band control, and benchmark logs.
+adds only headless stepping, root-only pre-control support, and benchmark logs.
 """
 
 from __future__ import annotations
@@ -32,9 +32,9 @@ def load_upstream_bridge(sim_root: Path, robot: str):
     config.ENABLE_ELASTIC_BAND = True
 
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize  # type: ignore
-    from unitree_sdk2py_bridge import ElasticBand, UnitreeSdk2Bridge  # type: ignore
+    from unitree_sdk2py_bridge import UnitreeSdk2Bridge  # type: ignore
 
-    return ChannelFactoryInitialize, ElasticBand, UnitreeSdk2Bridge
+    return ChannelFactoryInitialize, UnitreeSdk2Bridge
 
 
 def set_wireless_remote(low_state: Any, keys: int, lx: float, ly: float, rx: float, ry: float) -> None:
@@ -113,6 +113,7 @@ def main() -> int:
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--control-file", default="")
     parser.add_argument("--support-active", type=int, default=1)
+    parser.add_argument("--support-height", type=float, default=0.75)
     args = parser.parse_args()
 
     import mujoco
@@ -132,15 +133,17 @@ def main() -> int:
     }
     write_control(control_path, control)
 
-    ChannelFactoryInitialize, ElasticBand, UnitreeSdk2Bridge = load_upstream_bridge(sim_root, args.robot)
+    ChannelFactoryInitialize, UnitreeSdk2Bridge = load_upstream_bridge(sim_root, args.robot)
     ChannelFactoryInitialize(args.domain_id, args.interface)
 
     model = mujoco.MjModel.from_xml_path(str(scene))
     model.opt.timestep = args.dt
     data = mujoco.MjData(model)
+    data.qpos[0:3] = [0.0, 0.0, float(args.support_height)]
+    mujoco.mj_forward(model, data)
     bridge = UnitreeSdk2Bridge(model, data)
-    elastic_band = ElasticBand()
-    band_body = model.body("torso_link").id if args.robot in {"g1", "h1"} else model.body("base_link").id
+    support_root_qpos = data.qpos[:7].copy()
+    support_root_qvel = data.qvel[:6].copy()
 
     status_f, lowcmd_f, status_writer, lowcmd_writer = open_logs(out_dir, model.nu)
     started_wall = time.time()
@@ -171,10 +174,15 @@ def main() -> int:
                 float(control.get("ry", 0.0)),
             )
 
-            data.xfrc_applied[:] = 0.0
             if support_active:
-                data.xfrc_applied[band_body, :3] = elastic_band.Advance(data.qpos[:3], data.qvel[:3])
+                data.qpos[:7] = support_root_qpos
+                data.qvel[:6] = support_root_qvel
+                mujoco.mj_forward(model, data)
             mujoco.mj_step(model, data)
+            if support_active:
+                data.qpos[:7] = support_root_qpos
+                data.qvel[:6] = support_root_qvel
+                mujoco.mj_forward(model, data)
 
             if data.time + 1e-9 >= next_log_t:
                 now_wall = started_wall + elapsed
@@ -216,6 +224,7 @@ def main() -> int:
             "duration_s": args.duration_s,
             "dt": args.dt,
             "log_hz": args.log_hz,
+            "support_height": args.support_height,
             "control_file": str(control_path),
         }, indent=2) + "\n"
     )
