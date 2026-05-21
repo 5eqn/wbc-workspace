@@ -1321,6 +1321,56 @@ def policy_motion_duration(policy: str, motion: str) -> float:
     return float(frames) / 50.0
 
 
+def csv_shape(path: Path) -> tuple[int, int]:
+    rows = 0
+    width = 0
+    with path.open(newline="") as f:
+        reader = csv.reader(f)
+        next(reader, None)
+        for row in reader:
+            values = [value for value in row if value != ""]
+            if not values:
+                continue
+            rows += 1
+            width = len(values) if width == 0 else min(width, len(values))
+    if rows == 0 or width == 0:
+        raise ValueError(f"{path}: no numeric data rows")
+    return rows, width
+
+
+def write_sonic_metadata_for_stock_reader(dst: Path) -> None:
+    joint_rows, joint_width = csv_shape(dst / "joint_pos.csv")
+    body_pos_rows, body_pos_width = csv_shape(dst / "body_pos.csv")
+    body_quat_rows, body_quat_width = csv_shape(dst / "body_quat.csv")
+    body_lin_vel_rows, body_lin_vel_width = csv_shape(dst / "body_lin_vel.csv")
+    body_ang_vel_rows, body_ang_vel_width = csv_shape(dst / "body_ang_vel.csv")
+    body_count = body_pos_width // 3
+    quat_count = body_quat_width // 4
+    if body_count != quat_count:
+        raise ValueError(f"{dst}: body_pos/body_quat body-count mismatch")
+    indexes = " ".join(str(i) for i in range(body_count))
+    (dst / "metadata.txt").write_text(
+        "\n".join([
+            f"Metadata for: {dst.name}",
+            "==============================",
+            "",
+            "Body part indexes:",
+            f"[ {indexes}]",
+            "",
+            f"Total timesteps: {joint_rows}",
+            "",
+            "Data arrays summary:",
+            f"  joint_pos: ({joint_rows}, {joint_width}) (float64)",
+            f"  joint_vel: ({joint_rows}, {joint_width}) (float64)",
+            f"  body_pos_w: ({body_pos_rows}, {body_count}, 3) (float64)",
+            f"  body_quat_w: ({body_quat_rows}, {quat_count}, 4) (float64)",
+            f"  body_lin_vel_w: ({body_lin_vel_rows}, {body_lin_vel_width // 3}, 3) (float64)",
+            f"  body_ang_vel_w: ({body_ang_vel_rows}, {body_ang_vel_width // 3}, 3) (float64)",
+            "",
+        ])
+    )
+
+
 def copy_sonic_single_motion(run_dir: Path, motion: str) -> Path:
     motion_root = run_dir / "sonic_motion_data"
     src = ROOT / "assets" / "motions" / "sonic_motions" / motion
@@ -1328,6 +1378,7 @@ def copy_sonic_single_motion(run_dir: Path, motion: str) -> Path:
     if dst.exists():
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
+    write_sonic_metadata_for_stock_reader(dst)
     return motion_root
 
 
@@ -1377,7 +1428,17 @@ def simulator_reference_args(policy: str, motion: str) -> list[str]:
 
 def simulator_scene_args(policy: str) -> list[str]:
     if policy == "sonic":
-        scene = ROOT / "thirdparties" / "unitree_mujoco" / "unitree_robots" / "g1" / "scene_29dof.xml"
+        scene = (
+            ROOT
+            / "thirdparties"
+            / "GR00T-WholeBodyControl"
+            / "gear_sonic"
+            / "data"
+            / "robot_model"
+            / "model_data"
+            / "g1"
+            / "scene_43dof.xml"
+        )
     else:
         scene = ROOT / "thirdparties" / "HoloMotion" / "assets" / "robots" / "unitree" / "G1" / "29dof" / "scene_29dof.xml"
     return ["--scene", f"/workspace/wbc/{scene.relative_to(ROOT)}"]
