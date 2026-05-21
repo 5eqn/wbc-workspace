@@ -1101,6 +1101,42 @@ def wait_for_support_state(run_dir: Path, support_active: int, timeout_s: float)
     raise TimeoutError(f"timed out waiting for simulator support_active={expected}")
 
 
+def wait_for_pre_release_hold(
+    run_dir: Path,
+    event_log: SequenceEventLog,
+    *,
+    window: int = 20,
+    max_base_z_span: float = 0.20,
+    timeout_s: float = 15.0,
+) -> None:
+    status_path = run_dir / "simulator_status.csv"
+    deadline = time.monotonic() + timeout_s
+    start_sim_time = latest_sim_time(run_dir)
+    while time.monotonic() < deadline:
+        if status_path.exists():
+            with status_path.open(newline="") as f:
+                rows = list(csv.DictReader(f))
+            active_rows = [
+                row for row in rows
+                if row.get("support_active") == "1"
+                and (start_sim_time is None or float(row["sim_time_s"]) >= start_sim_time)
+            ]
+            if len(active_rows) >= window:
+                recent = active_rows[-window:]
+                base_z = [float(row["base_z"]) for row in recent]
+                span = max(base_z) - min(base_z)
+                if span <= max_base_z_span:
+                    event_log.append(
+                        "pre_release_hold_converged",
+                        sim_time_s=float(recent[-1]["sim_time_s"]),
+                        support_active=1,
+                        detail=f"{window} support-active rows base_z_span={span:.6f}",
+                    )
+                    return
+        time.sleep(0.05)
+    raise TimeoutError("timed out waiting for pre-release hold convergence")
+
+
 def read_log_text(path: Path) -> str:
     if not path.exists():
         return ""
@@ -1385,6 +1421,7 @@ def run_holomotion_sequence(args: argparse.Namespace, run_dir: Path, control_fil
             detail=f"{marker}: {args.motion}_holomotion.npz",
         )
 
+        wait_for_pre_release_hold(run_dir, event_log)
         release_support(run_dir, control_file, event_log, "release simulator support after HoloMotion CONTROL")
         pulse_holomotion_key(control_file, "b")
         marker = wait_for_log_marker(
