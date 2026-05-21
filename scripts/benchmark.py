@@ -13,6 +13,8 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
+import time
 from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
@@ -39,9 +41,59 @@ CONTROL_EVENT = "control_state_observed"
 RELEASE_REQUEST_EVENT = "release_file_touched"
 RELEASE_CONFIRMED_EVENT = "support_release_confirmed"
 PLAYBACK_EVENTS = ["sent_key_T", "motion_start_observed", "motion_playing_observed"]
+EVENT_LOG_FIELDS = [
+    "event",
+    "monotonic_s",
+    "wall_time_s",
+    "sim_time_s",
+    "support_active",
+    "detail",
+]
 HOLOMOTION_MIN_TAG = "v1.3.0"
 SONIC_DEPLOY = ROOT / "thirdparties" / "GR00T-WholeBodyControl" / "gear_sonic_deploy"
 HOLO_DEPLOY = ROOT / "thirdparties" / "HoloMotion" / "deployment" / "unitree_g1_ros2_29dof"
+
+
+class SequenceEventLog:
+    """Append-only release-order event log for real benchmark runs."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._monotonic0 = time.monotonic()
+        self._wall0 = time.time()
+        if not self.path.exists():
+            with self.path.open("w", newline="") as f:
+                csv.DictWriter(f, fieldnames=EVENT_LOG_FIELDS).writeheader()
+
+    def append(
+        self,
+        event: str,
+        *,
+        sim_time_s: float | None = None,
+        support_active: int | bool | str | None = None,
+        detail: str = "",
+    ) -> None:
+        monotonic_s = time.monotonic() - self._monotonic0
+        row = {
+            "event": event,
+            "monotonic_s": f"{monotonic_s:.6f}",
+            "wall_time_s": f"{self._wall0 + monotonic_s:.6f}",
+            "sim_time_s": "" if sim_time_s is None else f"{float(sim_time_s):.6f}",
+            "support_active": "" if support_active is None else str(support_active),
+            "detail": detail,
+        }
+        with self.path.open("a", newline="") as f:
+            csv.DictWriter(f, fieldnames=EVENT_LOG_FIELDS).writerow(row)
+
+
+def write_sequence_events(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=EVENT_LOG_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in EVENT_LOG_FIELDS})
 
 
 def read_csv_matrix(path: Path, skip_prefix_cols: int = 0) -> np.ndarray:
@@ -231,6 +283,13 @@ def first_event(events: list[dict[str, str]], event: str) -> dict[str, str]:
     raise ValueError(f"missing event {event}")
 
 
+def first_event_index(events: list[dict[str, str]], event: str) -> int:
+    for index, row in enumerate(events):
+        if row.get("event") == event:
+            return index
+    raise ValueError(f"missing event {event}")
+
+
 def validate_release_order(run_dir: Path) -> dict:
     events = load_events(run_dir)
     control = first_event(events, CONTROL_EVENT)
@@ -243,6 +302,16 @@ def validate_release_order(run_dir: Path) -> dict:
             break
     if playback is None:
         raise ValueError(f"missing playback event ({', '.join(PLAYBACK_EVENTS)})")
+
+    control_i = first_event_index(events, CONTROL_EVENT)
+    release_request_i = first_event_index(events, RELEASE_REQUEST_EVENT)
+    release_confirmed_i = first_event_index(events, RELEASE_CONFIRMED_EVENT)
+    playback_i = events.index(playback)
+    if not control_i <= release_request_i <= release_confirmed_i <= playback_i:
+        raise ValueError(
+            "invalid release log order: expected CONTROL row <= release request "
+            "row <= release confirmed row <= playback row"
+        )
 
     control_t = event_time(control)
     release_request_t = event_time(release_request)
@@ -268,6 +337,79 @@ def validate_release_order(run_dir: Path) -> dict:
         "playback_event": playback.get("event"),
         "playback_event_s": playback_t,
     }
+
+
+def smoke_release_gate(_: argparse.Namespace) -> int:
+    valid_rows = [
+        {
+            "event": CONTROL_EVENT,
+            "monotonic_s": "1.000000",
+            "wall_time_s": "101.000000",
+            "sim_time_s": "1.000000",
+            "support_active": "1",
+            "detail": "policy/controller reached active CONTROL",
+        },
+        {
+            "event": RELEASE_REQUEST_EVENT,
+            "monotonic_s": "2.000000",
+            "wall_time_s": "102.000000",
+            "sim_time_s": "2.000000",
+            "support_active": "1",
+            "detail": "requested simulator support release",
+        },
+        {
+            "event": RELEASE_CONFIRMED_EVENT,
+            "monotonic_s": "2.100000",
+            "wall_time_s": "102.100000",
+            "sim_time_s": "2.100000",
+            "support_active": "0",
+            "detail": "simulator reports support inactive",
+        },
+        {
+            "event": "sent_key_T",
+            "monotonic_s": "2.200000",
+            "wall_time_s": "102.200000",
+            "sim_time_s": "2.200000",
+            "support_active": "0",
+            "detail": "stock SONIC playback trigger after release",
+        },
+    ]
+    invalid_order_rows = [valid_rows[0], valid_rows[3], valid_rows[1], valid_rows[2]]
+    invalid_support_rows = [
+        row if row["event"] != RELEASE_CONFIRMED_EVENT else {**row, "support_active": "1"}
+        for row in valid_rows
+    ]
+
+    results = []
+    with tempfile.TemporaryDirectory(prefix="wbc-release-gate-") as tmp:
+        tmp_path = Path(tmp)
+        cases = [
+            ("valid", valid_rows, True),
+            ("invalid_order", invalid_order_rows, False),
+            ("invalid_support", invalid_support_rows, False),
+        ]
+        for name, rows, should_pass in cases:
+            run_dir = tmp_path / name
+            write_sequence_events(run_dir / "sequence_events.csv", rows)
+            try:
+                validate_release_order(run_dir)
+                passed = True
+                error = ""
+            except Exception as exc:
+                passed = False
+                error = str(exc)
+            ok = passed is should_pass
+            results.append({
+                "case": name,
+                "ok": ok,
+                "passed_release_gate": passed,
+                "expected_pass": should_pass,
+                "error": error,
+            })
+
+    payload = {"ok": all(item["ok"] for item in results), "cases": results}
+    print(json.dumps(payload, indent=2))
+    return 0 if payload["ok"] else 1
 
 
 def tracking_window(run_dir: Path, tracked_t, tracked_q):
@@ -781,6 +923,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     sub.add_parser("prepare-assets").set_defaults(func=prepare_stock_assets)
     sub.add_parser("validate-deploy").set_defaults(func=validate_deploy)
     sub.add_parser("validate-images").set_defaults(func=validate_images)
+    sub.add_parser("smoke-release-gate").set_defaults(func=smoke_release_gate)
     sub.add_parser("smoke-holomotion").set_defaults(func=smoke_holomotion)
     sub.add_parser("smoke-sonic-build").set_defaults(func=smoke_sonic_build)
     p = sub.add_parser("report")
