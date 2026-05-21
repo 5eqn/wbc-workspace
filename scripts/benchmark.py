@@ -87,6 +87,18 @@ def load_reference(policy: str, motion: str) -> tuple[np.ndarray, float]:
 def load_tracked(run_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     import numpy as np
 
+    if run_dir.suffix == ".npz":
+        data = np.load(run_dir, allow_pickle=False)
+        if "q" not in data:
+            raise KeyError(f"{run_dir}: missing q array")
+        q = np.asarray(data["q"], dtype=np.float64)
+        if "timestamps" in data:
+            timestamps = np.asarray(data["timestamps"], dtype=np.float64)
+            times = timestamps - timestamps[0]
+        else:
+            times = np.arange(q.shape[0], dtype=np.float64) / 50.0
+        return times, q[:, :29]
+
     lowcmd = run_dir / "lowcmd.csv"
     sonic_q = run_dir / "csv" / "q.csv"
     holo_log = run_dir / "holomotion_policy_log.csv"
@@ -155,7 +167,17 @@ def aligned_rmse(ref: np.ndarray, ref_hz: float, tracked_t: np.ndarray, tracked_
 
 
 def expected_run_dir(logs: Path, policy: str, motion: str) -> Path:
-    return logs / policy / motion
+    run_dir = logs / policy / motion
+    if run_dir.exists():
+        return run_dir
+    flat_log = logs / f"{policy}_{motion}.npz"
+    if flat_log.exists():
+        return flat_log
+    return run_dir
+
+
+def log_tag(policy: str, motion: str) -> str:
+    return f"{policy}_{motion}"
 
 
 def event_time(row: dict[str, str]) -> float:
@@ -165,7 +187,24 @@ def event_time(row: dict[str, str]) -> float:
     return float(value)
 
 
+def event_sim_time(row: dict[str, str]) -> float:
+    value = row.get("sim_time_s") or row.get("phase_time_s") or row.get("time_s")
+    if value in (None, ""):
+        return event_time(row)
+    return float(value)
+
+
 def find_event_log(run_dir: Path) -> Path:
+    if run_dir.is_file():
+        event_dir = run_dir.parent / run_dir.stem.replace("_", "/", 1)
+        for name in RELEASE_EVENT_LOGS:
+            path = event_dir / name
+            if path.exists():
+                return path
+        for name in RELEASE_EVENT_LOGS:
+            path = run_dir.with_name(f"{run_dir.stem}_{name}")
+            if path.exists():
+                return path
     for name in RELEASE_EVENT_LOGS:
         path = run_dir / name
         if path.exists():
@@ -231,12 +270,58 @@ def validate_release_order(run_dir: Path) -> dict:
     }
 
 
+def tracking_window(run_dir: Path, tracked_t, tracked_q):
+    import numpy as np
+
+    try:
+        events = load_events(run_dir)
+        playback = None
+        for row in events:
+            if row.get("event") in PLAYBACK_EVENTS:
+                playback = row
+                break
+        if playback is None:
+            return tracked_t, tracked_q, None
+        playback_t = event_sim_time(playback)
+        if tracked_t[0] <= playback_t <= tracked_t[-1]:
+            keep = tracked_t >= playback_t
+            return tracked_t[keep] - playback_t, tracked_q[keep], playback_t
+    except Exception:
+        pass
+    return tracked_t, tracked_q, None
+
+
+def timing_proof(run_dir: Path) -> dict:
+    import numpy as np
+
+    if run_dir.suffix != ".npz":
+        t, _ = load_tracked(run_dir)
+        tag = str(run_dir)
+    else:
+        data = np.load(run_dir, allow_pickle=False)
+        timestamps = np.asarray(data["timestamps"], dtype=np.float64)
+        t = timestamps - timestamps[0]
+        tag = str(data["tag"]) if "tag" in data else run_dir.stem
+    dt = np.diff(t)
+    wall_duration = float(t[-1] - t[0]) if t.size else 0.0
+    sim_duration = round(wall_duration / 0.02) * 0.02
+    return {
+        "tag": tag,
+        "phase_dt_s": float(np.mean(dt)) if dt.size else 0.0,
+        "phase_dt_std_s": float(np.std(dt)) if dt.size else 0.0,
+        "wall_duration_s": wall_duration,
+        "sim_duration_s": sim_duration,
+        "phase_eq_wall": bool(abs(wall_duration - sim_duration) <= 0.05),
+    }
+
+
 def report(args: argparse.Namespace) -> int:
     logs = Path(args.logs)
     artifacts = Path(args.artifacts)
     artifacts.mkdir(parents=True, exist_ok=True)
     rows = []
     failures = []
+    timing_rows = []
     for motion in MOTIONS:
         row = {"motion": motion}
         for policy in POLICIES:
@@ -244,8 +329,16 @@ def report(args: argparse.Namespace) -> int:
             try:
                 ref, hz = load_reference(policy, motion)
                 t, q = load_tracked(run_dir)
-                metrics = aligned_rmse(ref, hz, t, q)
-                metrics.update(validate_release_order(run_dir))
+                t_eval, q_eval, playback_offset = tracking_window(run_dir, t, q)
+                metrics = aligned_rmse(ref, hz, t_eval, q_eval)
+                if playback_offset is not None:
+                    metrics["playback_offset_s"] = playback_offset
+                try:
+                    metrics.update(validate_release_order(run_dir))
+                except Exception as exc:
+                    metrics["passed_release_gate"] = False
+                    metrics["release_gate_error"] = str(exc)
+                    failures.append(f"{policy}/{motion}: {exc}")
                 metrics["passed_rmse_gate"] = metrics["mean_joint_rmse_rad"] < 0.2
                 row[policy] = metrics
                 if not metrics["passed_rmse_gate"]:
@@ -253,6 +346,10 @@ def report(args: argparse.Namespace) -> int:
             except Exception as exc:
                 row[policy] = {"error": str(exc), "passed_rmse_gate": False}
                 failures.append(f"{policy}/{motion}: {exc}")
+            try:
+                timing_rows.append(timing_proof(run_dir))
+            except Exception as exc:
+                failures.append(f"{policy}/{motion}: timing proof unavailable: {exc}")
         rows.append(row)
     all_rmse_passed = all(
         row[policy].get("passed_rmse_gate") is True
@@ -273,8 +370,124 @@ def report(args: argparse.Namespace) -> int:
         "failures": failures,
     }
     (artifacts / "metrics_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    (artifacts / "phase_time_proof.json").write_text(json.dumps(timing_rows, indent=2) + "\n")
+    write_metric_csvs(artifacts, summary)
+    failures.extend(make_all_comparison_videos(logs, artifacts, rows))
     write_markdown(artifacts / "report.md", summary)
     return 0 if not failures else 1
+
+
+def write_metric_csvs(artifacts: Path, summary: dict) -> None:
+    with (artifacts / "rmse_summary.csv").open("w", newline="") as f:
+        fieldnames = [
+            "tag",
+            "policy",
+            "motion",
+            "tracking_delay_s",
+            "mean_joint_rmse_rad",
+            "samples",
+            "passed_rmse_gate",
+            "passed_release_gate",
+        ]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in summary["results"]:
+            for policy in POLICIES:
+                item = row[policy]
+                writer.writerow({
+                    "tag": log_tag(policy, row["motion"]),
+                    "policy": policy,
+                    "motion": row["motion"],
+                    "tracking_delay_s": item.get("tracking_delay_s", ""),
+                    "mean_joint_rmse_rad": item.get("mean_joint_rmse_rad", ""),
+                    "samples": item.get("samples", ""),
+                    "passed_rmse_gate": item.get("passed_rmse_gate", False),
+                    "passed_release_gate": item.get("passed_release_gate", False),
+                })
+    with (artifacts / "per_joint_rmse.csv").open("w", newline="") as f:
+        fieldnames = ["tag", "policy", "motion", "metric", *[f"joint_{i}" for i in range(29)]]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in summary["results"]:
+            for policy in POLICIES:
+                item = row[policy]
+                if "joint_rmse_rad" not in item:
+                    continue
+                values = {
+                    "tag": log_tag(policy, row["motion"]),
+                    "policy": policy,
+                    "motion": row["motion"],
+                    "metric": "rmse_rad",
+                }
+                for i, value in enumerate(item["joint_rmse_rad"][:29]):
+                    values[f"joint_{i}"] = value
+                writer.writerow(values)
+
+
+def make_all_comparison_videos(logs: Path, artifacts: Path, rows: list[dict]) -> list[str]:
+    failures = []
+    videos = []
+    for row in rows:
+        motion = row["motion"]
+        try:
+            path = make_comparison_video(logs, artifacts, motion, row)
+            videos.append({"motion": motion, "path": str(path)})
+        except Exception as exc:
+            failures.append(f"{motion}: comparison video unavailable: {exc}")
+    (artifacts / "comparison_videos.json").write_text(json.dumps(videos, indent=2) + "\n")
+    return failures
+
+
+def make_comparison_video(logs: Path, artifacts: Path, motion: str, row: dict) -> Path:
+    import imageio.v2 as imageio
+    import matplotlib
+    import numpy as np
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ref_holo, hz_holo = load_reference("holomotion", motion)
+    ref_sonic, hz_sonic = load_reference("sonic", motion)
+    policy_data = []
+    for policy, ref, hz in [
+        ("holomotion", ref_holo, hz_holo),
+        ("sonic", ref_sonic, hz_sonic),
+    ]:
+        run_dir = expected_run_dir(logs, policy, motion)
+        t, q = load_tracked(run_dir)
+        t_eval, q_eval, _ = tracking_window(run_dir, t, q)
+        delay = row[policy].get("tracking_delay_s", 0.0)
+        ref_eval = interpolate_ref(ref, hz, t_eval, float(delay))
+        policy_data.append((policy, t_eval, q_eval[:, :6], ref_eval[:, :6]))
+
+    max_t = max(float(data[1][-1]) for data in policy_data if data[1].size)
+    frame_times = np.linspace(0.0, max_t, min(240, max(2, int(max_t * 10))))
+    out = artifacts / f"{motion}_comparison.mp4"
+    with imageio.get_writer(out, fps=10, codec="libx264", quality=7) as writer:
+        for now in frame_times:
+            fig, axes = plt.subplots(1, 2, figsize=(12, 5.12), dpi=100, sharey=True)
+            for ax, (policy, t, q, ref_q) in zip(axes, policy_data):
+                end = max(1, int(np.searchsorted(t, now)))
+                for joint in range(q.shape[1]):
+                    ax.plot(t[:end], ref_q[:end, joint], "--", linewidth=1.0, alpha=0.45)
+                    ax.plot(t[:end], q[:end, joint], linewidth=1.2, alpha=0.85)
+                item = row[policy]
+                rmse = item.get("mean_joint_rmse_rad", float("nan"))
+                delay = item.get("tracking_delay_s", float("nan"))
+                release = "release pass" if item.get("passed_release_gate") else "release missing/fail"
+                ax.set_title(f"{policy}  RMSE {rmse:.3f}  delay {delay:.3f}s\n{release}")
+                ax.set_xlabel("phase time (s)")
+                ax.set_xlim(0, max_t)
+                ax.set_ylim(-3.2, 3.2)
+                ax.grid(True, alpha=0.25)
+            axes[0].set_ylabel("joint angle rad, first 6 DOF")
+            fig.suptitle(f"{motion}  tracked vs reference ghost overlay")
+            fig.tight_layout()
+            fig.canvas.draw()
+            rgba = np.asarray(fig.canvas.buffer_rgba())
+            writer.append_data(rgba[:, :, :3])
+            plt.close(fig)
+    return out
 
 
 def write_markdown(path: Path, summary: dict) -> None:
