@@ -484,6 +484,38 @@ def validate_images(_: argparse.Namespace) -> int:
     return 0 if not failures else 1
 
 
+def smoke_holomotion(_: argparse.Namespace) -> int:
+    script = (
+        "cd /workspace/HoloMotion/deployment/unitree_g1_ros2_29dof && "
+        "timeout 20s ./launch_holomotion_29dof_docker.sh "
+        "--profile launch_profiles/x86_64_docker.yaml "
+        "--set runtime.unitree_setup=/opt/unitree_ros2/cyclonedds_ws/install/setup.bash "
+        "--set robot.network_interface=lo "
+        "--set policy.inference_backend=onnx"
+    )
+    result = docker_check("wbc-holomotion", script)
+    combined = "\n".join(
+        str(result.get(key, "")) for key in ("stdout", "stderr")
+    )
+    markers = [
+        "Entered ZERO_TORQUE state",
+        "latest_obs subscriber ready",
+        "Dual policies loaded successfully",
+        "Loaded 10 motion clips successfully",
+        "Policy node setup completed successfully",
+    ]
+    missing = [marker for marker in markers if marker not in combined]
+    ok = result["returncode"] in {0, 124} and not missing
+    payload = {
+        "ok": ok,
+        "image": result["image"],
+        "returncode": result["returncode"],
+        "missing_markers": missing,
+    }
+    print(json.dumps(payload, indent=2))
+    return 0 if ok else 1
+
+
 def docker(args: argparse.Namespace) -> int:
     image = f"wbc-{args.image}"
     dockerfile = ROOT / "docker" / f"{args.image}.Dockerfile"
@@ -499,6 +531,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     sub.add_parser("prepare-assets").set_defaults(func=prepare_stock_assets)
     sub.add_parser("validate-deploy").set_defaults(func=validate_deploy)
     sub.add_parser("validate-images").set_defaults(func=validate_images)
+    sub.add_parser("smoke-holomotion").set_defaults(func=smoke_holomotion)
     p = sub.add_parser("report")
     p.add_argument("--logs", default=str(ROOT / "logs"))
     p.add_argument("--artifacts", default=str(ROOT / "artifacts"))
