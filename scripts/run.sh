@@ -31,10 +31,11 @@ case "$cmd" in
     "$PYTHON_BIN" "$ROOT_DIR/scripts/benchmark.py" validate-images
     ;;
   all)
-    "$0" build
     "$0" validate-assets
     "$0" prepare-assets
+    "$0" build
     "$0" validate-deploy
+    "$0" validate-images
     ;;
   -h|--help|help)
     usage
