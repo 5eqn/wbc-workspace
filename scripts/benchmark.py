@@ -38,6 +38,7 @@ CONTROL_EVENT = "control_state_observed"
 RELEASE_REQUEST_EVENT = "release_file_touched"
 RELEASE_CONFIRMED_EVENT = "support_release_confirmed"
 PLAYBACK_EVENTS = ["sent_key_T", "motion_start_observed", "motion_playing_observed"]
+HOLOMOTION_MIN_TAG = "v1.3.0"
 
 
 def read_csv_matrix(path: Path, skip_prefix_cols: int = 0) -> np.ndarray:
@@ -323,6 +324,52 @@ def validate_assets(_: argparse.Namespace) -> int:
     return 0 if not missing else 1
 
 
+def git_output(args: list[str], cwd: Path) -> str:
+    return subprocess.check_output(
+        ["git", "-c", f"safe.directory={cwd}", *args], cwd=cwd, text=True
+    ).strip()
+
+
+def validate_deploy(_: argparse.Namespace) -> int:
+    checks: list[dict[str, str | bool]] = []
+
+    def add(name: str, ok: bool, detail: str = "") -> None:
+        checks.append({"name": name, "ok": ok, "detail": detail})
+
+    holo = ROOT / "thirdparties" / "HoloMotion"
+    sonic = ROOT / "thirdparties" / "GR00T-WholeBodyControl" / "gear_sonic_deploy"
+    try:
+        version = git_output(["describe", "--tags", "--always"], holo)
+    except Exception as exc:
+        version = f"unavailable: {exc}"
+    add("holomotion_v1_3_lineage", version.startswith(HOLOMOTION_MIN_TAG), version)
+    add(
+        "holomotion_stock_launcher",
+        (holo / "deployment" / "unitree_g1_ros2_29dof" / "launch_holomotion_29dof_docker.sh").exists(),
+        "launch_holomotion_29dof_docker.sh",
+    )
+    doc = holo / "docs" / "realworld_deployment.md"
+    doc_text = doc.read_text(errors="replace") if doc.exists() else ""
+    add("holomotion_offline_motion_docs", "Offline Motion" in doc_text, str(doc))
+    add("holomotion_motion_mode_docs", "Press `B` to enter motion tracking" in doc_text, str(doc))
+    add(
+        "sonic_stock_deploy",
+        (sonic / "deploy.sh").exists() and (sonic / ".justfile").exists(),
+        "deploy.sh + .justfile",
+    )
+    deploy_text = (sonic / "deploy.sh").read_text(errors="replace") if (sonic / "deploy.sh").exists() else ""
+    add("sonic_stock_binary_recipe", "g1_deploy_onnx_ref" in deploy_text, "g1_deploy_onnx_ref")
+    add(
+        "run_sonic_reference_only",
+        (ROOT / "thirdparties" / "run-sonic").exists(),
+        "present for read-only reference; not used by this script",
+    )
+
+    failures = [item for item in checks if not item["ok"]]
+    print(json.dumps({"ok": not failures, "checks": checks}, indent=2))
+    return 0 if not failures else 1
+
+
 def docker(args: argparse.Namespace) -> int:
     image = f"wbc-{args.image}"
     dockerfile = ROOT / "docker" / f"{args.image}.Dockerfile"
@@ -335,6 +382,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("validate-assets").set_defaults(func=validate_assets)
+    sub.add_parser("validate-deploy").set_defaults(func=validate_deploy)
     p = sub.add_parser("report")
     p.add_argument("--logs", default=str(ROOT / "logs"))
     p.add_argument("--artifacts", default=str(ROOT / "artifacts"))
