@@ -52,7 +52,9 @@ Results will be reviewed by Claude Opus 4.6 and a human expert in embodied intel
 
 6. **Host requires minimal dependencies.** No venv, no ROS2/DDS on the host. Only Docker, Python (standard library + common packages like numpy/matplotlib), and standard bash tools. All heavyweight runtimes (ROS2, DDS, MuJoCo, PyTorch, ONNX Runtime) live exclusively inside Docker containers.
 
-7. After `report.sh` completes, `artifacts/` must contain:
+7. **`thirdparties/run-sonic/` is read-only reference material.** You may inspect its docs and scripts to understand proven workflows, timing checks, joint-order handling, metrics, and video rendering, but benchmark execution must not depend on running code from `thirdparties/run-sonic/`, and you must not modify it. Any benchmark-owned implementation scripts must live flat in the root `scripts/` directory; do not add script subdirectories and do not place new executable glue under `thirdparties/`.
+
+8. After `report.sh` completes, `artifacts/` must contain:
    - Proof that phase time = wall time = sim time
    - Mean joint RMSE < 0.2 for both policies, all 10 motions (or documented impossibility)
    - Tracking delay per policy per motion (should fall within -0.2s ~ 0.2s; positive preferred, prior estimate ~0.04s)
