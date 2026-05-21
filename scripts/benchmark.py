@@ -1575,7 +1575,6 @@ def run_sonic_sequence(args: argparse.Namespace, run_dir: Path, control_file: Pa
             support_active=1,
             detail=marker,
         )
-        wait_for_pre_release_hold(run_dir, event_log)
         release_support(run_dir, control_file, event_log, "release simulator support after SONIC CONTROL")
         if args.sonic_post_release_wait_s > 0.0:
             time.sleep(args.sonic_post_release_wait_s)
