@@ -11,6 +11,7 @@ import argparse
 import csv
 import json
 from pathlib import Path
+import shutil
 import subprocess
 from typing import TYPE_CHECKING, Iterable
 
@@ -39,6 +40,8 @@ RELEASE_REQUEST_EVENT = "release_file_touched"
 RELEASE_CONFIRMED_EVENT = "support_release_confirmed"
 PLAYBACK_EVENTS = ["sent_key_T", "motion_start_observed", "motion_playing_observed"]
 HOLOMOTION_MIN_TAG = "v1.3.0"
+SONIC_DEPLOY = ROOT / "thirdparties" / "GR00T-WholeBodyControl" / "gear_sonic_deploy"
+HOLO_DEPLOY = ROOT / "thirdparties" / "HoloMotion" / "deployment" / "unitree_g1_ros2_29dof"
 
 
 def read_csv_matrix(path: Path, skip_prefix_cols: int = 0) -> np.ndarray:
@@ -324,6 +327,41 @@ def validate_assets(_: argparse.Namespace) -> int:
     return 0 if not missing else 1
 
 
+def copy_tree_contents(src: Path, dst: Path) -> None:
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        target = dst / item.name
+        if item.is_dir():
+            shutil.copytree(item, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, target)
+
+
+def prepare_stock_assets(_: argparse.Namespace) -> int:
+    gear_assets = ROOT / "assets" / "GEAR-SONIC"
+    sonic_policy = SONIC_DEPLOY / "policy" / "release"
+    sonic_policy.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(gear_assets / "model_decoder.onnx", sonic_policy / "model_decoder.onnx")
+    shutil.copy2(gear_assets / "model_encoder.onnx", sonic_policy / "model_encoder.onnx")
+    shutil.copy2(gear_assets / "observation_config.yaml", sonic_policy / "observation_config.yaml")
+    copy_tree_contents(ROOT / "assets" / "motions" / "sonic_motions", SONIC_DEPLOY / "reference" / "benchmark")
+
+    holo_models = ROOT / "assets" / "HoloMotion_models"
+    holo_model_dst = HOLO_DEPLOY / "src" / "models"
+    copy_tree_contents(holo_models / "HoloMotion_motion_tracking_model", holo_model_dst / "motion_tracking_model")
+    copy_tree_contents(holo_models / "HoloMotion_velocity_tracking_model", holo_model_dst / "velocity_tracking_model")
+    copy_tree_contents(ROOT / "assets" / "motions" / "holomotion_motions", HOLO_DEPLOY / "src" / "motion_data")
+
+    staged = {
+        "sonic_policy": str(sonic_policy),
+        "sonic_motion_data": str(SONIC_DEPLOY / "reference" / "benchmark"),
+        "holomotion_models": str(holo_model_dst),
+        "holomotion_motion_data": str(HOLO_DEPLOY / "src" / "motion_data"),
+    }
+    print(json.dumps({"ok": True, "staged": staged}, indent=2))
+    return 0
+
+
 def git_output(args: list[str], cwd: Path) -> str:
     return subprocess.check_output(
         ["git", "-c", f"safe.directory={cwd}", *args], cwd=cwd, text=True
@@ -332,9 +370,13 @@ def git_output(args: list[str], cwd: Path) -> str:
 
 def validate_deploy(_: argparse.Namespace) -> int:
     checks: list[dict[str, str | bool]] = []
+    warnings: list[dict[str, str | bool]] = []
 
     def add(name: str, ok: bool, detail: str = "") -> None:
         checks.append({"name": name, "ok": ok, "detail": detail})
+
+    def warn(name: str, ok: bool, detail: str = "") -> None:
+        warnings.append({"name": name, "ok": ok, "detail": detail})
 
     holo = ROOT / "thirdparties" / "HoloMotion"
     sonic = ROOT / "thirdparties" / "GR00T-WholeBodyControl" / "gear_sonic_deploy"
@@ -360,13 +402,29 @@ def validate_deploy(_: argparse.Namespace) -> int:
     deploy_text = (sonic / "deploy.sh").read_text(errors="replace") if (sonic / "deploy.sh").exists() else ""
     add("sonic_stock_binary_recipe", "g1_deploy_onnx_ref" in deploy_text, "g1_deploy_onnx_ref")
     add(
+        "sonic_benchmark_assets_staged",
+        (sonic / "policy" / "release" / "model_decoder.onnx").exists()
+        and (sonic / "policy" / "release" / "model_encoder.onnx").exists()
+        and (sonic / "reference" / "benchmark" / MOTIONS[0] / "joint_pos.csv").exists(),
+        "run scripts/run.sh prepare-assets",
+    )
+    planner = sonic / "planner" / "target_vel" / "V2" / "planner_sonic.onnx"
+    warn("sonic_optional_velocity_planner_present", planner.exists(), str(planner))
+    add(
+        "holomotion_assets_staged",
+        (holo / "deployment" / "unitree_g1_ros2_29dof" / "src" / "models" / "motion_tracking_model" / "exported" / "motion_tracking_model.onnx").exists()
+        and (holo / "deployment" / "unitree_g1_ros2_29dof" / "src" / "models" / "velocity_tracking_model" / "exported" / "velocity_model.onnx").exists()
+        and (holo / "deployment" / "unitree_g1_ros2_29dof" / "src" / "motion_data" / f"{MOTIONS[0]}_holomotion.npz").exists(),
+        "run scripts/run.sh prepare-assets",
+    )
+    add(
         "run_sonic_reference_only",
         (ROOT / "thirdparties" / "run-sonic").exists(),
         "present for read-only reference; not used by this script",
     )
 
     failures = [item for item in checks if not item["ok"]]
-    print(json.dumps({"ok": not failures, "checks": checks}, indent=2))
+    print(json.dumps({"ok": not failures, "checks": checks, "warnings": warnings}, indent=2))
     return 0 if not failures else 1
 
 
@@ -382,6 +440,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("validate-assets").set_defaults(func=validate_assets)
+    sub.add_parser("prepare-assets").set_defaults(func=prepare_stock_assets)
     sub.add_parser("validate-deploy").set_defaults(func=validate_deploy)
     p = sub.add_parser("report")
     p.add_argument("--logs", default=str(ROOT / "logs"))

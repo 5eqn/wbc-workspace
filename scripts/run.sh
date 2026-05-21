@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 usage() {
-  echo "Usage: $0 [build|validate-assets|validate-deploy|all]"
+  echo "Usage: $0 [build|validate-assets|prepare-assets|validate-deploy|all]"
 }
 
 cmd="${1:-all}"
@@ -19,6 +19,10 @@ case "$cmd" in
     docker run --rm -v "$ROOT_DIR:/workspace/wbc" -w /workspace/wbc wbc-unitree_mujoco \
       python3 scripts/benchmark.py validate-assets
     ;;
+  prepare-assets)
+    docker run --rm -v "$ROOT_DIR:/workspace/wbc" -w /workspace/wbc wbc-unitree_mujoco \
+      python3 scripts/benchmark.py prepare-assets
+    ;;
   validate-deploy)
     docker run --rm -v "$ROOT_DIR:/workspace/wbc" -w /workspace/wbc wbc-unitree_mujoco \
       python3 scripts/benchmark.py validate-deploy
@@ -26,6 +30,7 @@ case "$cmd" in
   all)
     "$0" build
     "$0" validate-assets
+    "$0" prepare-assets
     "$0" validate-deploy
     ;;
   -h|--help|help)
