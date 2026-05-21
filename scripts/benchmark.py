@@ -8,10 +8,13 @@ reference, but it does not import or execute code from thirdparties/run-sonic.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import json
+import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -52,6 +55,20 @@ EVENT_LOG_FIELDS = [
 HOLOMOTION_MIN_TAG = "v1.3.0"
 SONIC_DEPLOY = ROOT / "thirdparties" / "GR00T-WholeBodyControl" / "gear_sonic_deploy"
 HOLO_DEPLOY = ROOT / "thirdparties" / "HoloMotion" / "deployment" / "unitree_g1_ros2_29dof"
+SIM_IMAGE = "wbc-unitree_mujoco"
+SONIC_IMAGE = "wbc-gear-sonic"
+HOLO_IMAGE = "wbc-holomotion"
+HOLO_KEY_BITS = {
+    "start": 1 << 2,
+    "select": 1 << 3,
+    "a": 1 << 8,
+    "b": 1 << 9,
+    "y": 1 << 11,
+    "up": 1 << 12,
+    "right": 1 << 13,
+    "down": 1 << 14,
+    "left": 1 << 15,
+}
 
 
 class SequenceEventLog:
@@ -717,6 +734,438 @@ def prepare_stock_assets(_: argparse.Namespace) -> int:
     return 0
 
 
+class ManagedProcess:
+    """Small process wrapper that keeps policy stdout in a file while driving stdin."""
+
+    def __init__(self, cmd: list[str], log_path: Path, *, use_pty: bool = False):
+        self.cmd = cmd
+        self.log_path = log_path
+        self.use_pty = use_pty
+        self.proc: subprocess.Popen | None = None
+        self._master_fd: int | None = None
+        self._log_f = None
+
+    def start(self) -> None:
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.use_pty:
+            import fcntl
+            import pty
+
+            master_fd, slave_fd = pty.openpty()
+            flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+            fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            self._log_f = self.log_path.open("wb")
+            self.proc = subprocess.Popen(
+                self.cmd,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+                preexec_fn=os.setsid,
+            )
+            os.close(slave_fd)
+            self._master_fd = master_fd
+            return
+
+        self._log_f = self.log_path.open("wb")
+        self.proc = subprocess.Popen(
+            self.cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=self._log_f,
+            stderr=subprocess.STDOUT,
+            preexec_fn=os.setsid,
+        )
+
+    def poll(self) -> int | None:
+        self._drain_pty()
+        return None if self.proc is None else self.proc.poll()
+
+    def send(self, text: str) -> None:
+        if self._master_fd is None:
+            raise RuntimeError("process was not started with a pty")
+        os.write(self._master_fd, text.encode())
+        self._drain_pty()
+
+    def _drain_pty(self) -> None:
+        if self._master_fd is None or self._log_f is None:
+            return
+        while True:
+            try:
+                data = os.read(self._master_fd, 65536)
+            except BlockingIOError:
+                break
+            except OSError:
+                break
+            if not data:
+                break
+            self._log_f.write(data)
+            self._log_f.flush()
+
+    def terminate(self, timeout: float = 10.0) -> None:
+        self._drain_pty()
+        proc = self.proc
+        if proc is not None and proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGINT)
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait(timeout=5.0)
+        self._drain_pty()
+        if self._master_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(self._master_fd)
+            self._master_fd = None
+        if self._log_f is not None:
+            self._log_f.close()
+            self._log_f = None
+
+
+def docker_rm_force(name: str) -> None:
+    subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+
+def docker_base_args(name: str, image: str, *, tty: bool = False) -> list[str]:
+    args = ["docker", "run", "--rm", "--name", name, "--network", "host"]
+    if tty:
+        args.extend(["-i", "-t"])
+    args.extend(["-v", f"{ROOT}:/workspace/wbc", image])
+    return args
+
+
+def read_control_file(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {
+            "support_active": True,
+            "wireless_keys": 0,
+            "lx": 0.0,
+            "ly": 0.0,
+            "rx": 0.0,
+            "ry": 0.0,
+            "stop": False,
+        }
+    return json.loads(path.read_text())
+
+
+def update_control_file(path: Path, **updates: object) -> dict[str, object]:
+    data = read_control_file(path)
+    data.update(updates)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return data
+
+
+def wait_for_file(path: Path, timeout_s: float) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if path.exists() and path.stat().st_size > 0:
+            return
+        time.sleep(0.05)
+    raise TimeoutError(f"timed out waiting for {path}")
+
+
+def latest_sim_status(run_dir: Path) -> dict[str, str] | None:
+    path = run_dir / "simulator_status.csv"
+    if not path.exists():
+        return None
+    with path.open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    return rows[-1] if rows else None
+
+
+def latest_sim_time(run_dir: Path) -> float | None:
+    row = latest_sim_status(run_dir)
+    if not row:
+        return None
+    value = row.get("sim_time_s")
+    return None if value in (None, "") else float(value)
+
+
+def wait_for_support_state(run_dir: Path, support_active: int, timeout_s: float) -> dict[str, str]:
+    deadline = time.monotonic() + timeout_s
+    expected = str(int(support_active))
+    while time.monotonic() < deadline:
+        row = latest_sim_status(run_dir)
+        if row and row.get("support_active") == expected:
+            return row
+        time.sleep(0.05)
+    raise TimeoutError(f"timed out waiting for simulator support_active={expected}")
+
+
+def read_log_text(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(errors="replace")
+
+
+def wait_for_log_marker(
+    proc: ManagedProcess,
+    log_path: Path,
+    markers: str | list[str],
+    timeout_s: float,
+) -> str:
+    marker_list = [markers] if isinstance(markers, str) else markers
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        proc.poll()
+        text = read_log_text(log_path)
+        for marker in marker_list:
+            if marker in text:
+                return marker
+        code = proc.poll()
+        if code is not None:
+            raise RuntimeError(f"process exited before marker {marker_list}: {code}")
+        time.sleep(0.1)
+    raise TimeoutError(f"timed out waiting for log marker {marker_list}")
+
+
+def pulse_holomotion_key(control_file: Path, key: str, *, hold_s: float = 0.16, gap_s: float = 0.16) -> None:
+    update_control_file(control_file, wireless_keys=HOLO_KEY_BITS[key])
+    time.sleep(hold_s)
+    update_control_file(control_file, wireless_keys=0)
+    time.sleep(gap_s)
+
+
+def release_support(run_dir: Path, control_file: Path, event_log: SequenceEventLog, detail: str) -> None:
+    row = latest_sim_status(run_dir)
+    event_log.append(
+        RELEASE_REQUEST_EVENT,
+        sim_time_s=latest_sim_time(run_dir),
+        support_active=(row or {}).get("support_active", "1"),
+        detail=detail,
+    )
+    update_control_file(control_file, support_active=False)
+    released = wait_for_support_state(run_dir, 0, 5.0)
+    event_log.append(
+        RELEASE_CONFIRMED_EVENT,
+        sim_time_s=float(released["sim_time_s"]),
+        support_active=0,
+        detail="simulator reports support inactive",
+    )
+
+
+def policy_motion_duration(policy: str, motion: str) -> float:
+    ref, hz = load_reference(policy, motion)
+    return float(ref.shape[0]) / float(hz)
+
+
+def copy_sonic_single_motion(run_dir: Path, motion: str) -> Path:
+    motion_root = run_dir / "sonic_motion_data"
+    src = ROOT / "assets" / "motions" / "sonic_motions" / motion
+    dst = motion_root / motion
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst)
+    return motion_root
+
+
+def holomotion_clip_index(motion: str) -> int:
+    clips = sorted(f"{name}_holomotion.npz" for name in MOTIONS)
+    target = f"{motion}_holomotion.npz"
+    return clips.index(target)
+
+
+def start_simulator(run_dir: Path, control_file: Path, duration_s: float, name: str) -> ManagedProcess:
+    docker_rm_force(name)
+    cmd = docker_base_args(name, SIM_IMAGE) + [
+        "python3",
+        "/workspace/wbc/scripts/sim_bridge.py",
+        "--sim-root",
+        "/workspace/unitree_mujoco",
+        "--robot",
+        "g1",
+        "--interface",
+        "lo",
+        "--duration-s",
+        f"{duration_s:.3f}",
+        "--dt",
+        "0.005",
+        "--log-hz",
+        "50",
+        "--out-dir",
+        f"/workspace/wbc/{run_dir.relative_to(ROOT)}",
+        "--control-file",
+        f"/workspace/wbc/{control_file.relative_to(ROOT)}",
+    ]
+    proc = ManagedProcess(cmd, run_dir / "simulator_stdout.log")
+    proc.start()
+    wait_for_file(control_file, 10.0)
+    wait_for_support_state(run_dir, 1, 10.0)
+    return proc
+
+
+def run_sonic_sequence(args: argparse.Namespace, run_dir: Path, control_file: Path, event_log: SequenceEventLog) -> None:
+    motion_root = copy_sonic_single_motion(run_dir, args.motion)
+    name = f"wbc-sonic-{args.motion[:32]}-{int(time.time())}"
+    docker_rm_force(name)
+    script = (
+        "cd /workspace/GR00T-WholeBodyControl/gear_sonic_deploy && "
+        "source /opt/ros/humble/setup.bash && "
+        "./deploy.sh "
+        "--planner '' "
+        f"--motion-data /workspace/wbc/{motion_root.relative_to(ROOT)} "
+        "--input-type keyboard "
+        "--output-type all "
+        "sim"
+    )
+    policy = ManagedProcess(
+        docker_base_args(name, SONIC_IMAGE, tty=True) + ["bash", "-lc", script],
+        run_dir / "sonic_stdout.log",
+        use_pty=True,
+    )
+    try:
+        policy.start()
+        with contextlib.suppress(Exception):
+            wait_for_log_marker(policy, policy.log_path, "Proceed with deployment?", 20.0)
+        policy.send("\n")
+        wait_for_log_marker(policy, policy.log_path, "Init Done", args.policy_ready_timeout_s)
+        policy.send("]")
+        marker = wait_for_log_marker(
+            policy,
+            policy.log_path,
+            "[Control] DEBUG: operator_state.start=true, transitioning to CONTROL state",
+            args.policy_ready_timeout_s,
+        )
+        event_log.append(
+            CONTROL_EVENT,
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=1,
+            detail=marker,
+        )
+        release_support(run_dir, control_file, event_log, "release simulator support after SONIC CONTROL")
+        policy.send("T")
+        event_log.append(
+            "sent_key_T",
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=0,
+            detail="stock SONIC keyboard playback trigger after confirmed release",
+        )
+        time.sleep(args.motion_duration_s)
+    finally:
+        update_control_file(control_file, stop=True)
+        policy.terminate()
+        docker_rm_force(name)
+
+
+def run_holomotion_sequence(args: argparse.Namespace, run_dir: Path, control_file: Path, event_log: SequenceEventLog) -> None:
+    name = f"wbc-holo-{args.motion[:32]}-{int(time.time())}"
+    docker_rm_force(name)
+    script = (
+        "cd /workspace/HoloMotion/deployment/unitree_g1_ros2_29dof && "
+        "./launch_holomotion_29dof_docker.sh "
+        "--profile launch_profiles/x86_64_docker.yaml "
+        "--set runtime.unitree_setup=/opt/unitree_ros2/cyclonedds_ws/install/setup.bash "
+        "--set robot.network_interface=lo "
+        "--set policy.inference_backend=onnx"
+    )
+    policy = ManagedProcess(
+        docker_base_args(name, HOLO_IMAGE) + ["bash", "-lc", script],
+        run_dir / "holomotion_stdout.log",
+    )
+    try:
+        policy.start()
+        wait_for_log_marker(policy, policy.log_path, "Policy node setup completed successfully", args.policy_ready_timeout_s)
+        wait_for_log_marker(policy, policy.log_path, "Entered ZERO_TORQUE state", args.policy_ready_timeout_s)
+
+        pulse_holomotion_key(control_file, "start")
+        wait_for_log_marker(policy, policy.log_path, "Switching to MOVE_TO_DEFAULT state", args.policy_ready_timeout_s)
+        time.sleep(args.holomotion_default_wait_s)
+
+        pulse_holomotion_key(control_file, "a")
+        marker = wait_for_log_marker(
+            policy,
+            policy.log_path,
+            "Switching to POLICY state",
+            args.policy_ready_timeout_s,
+        )
+        wait_for_log_marker(policy, policy.log_path, "Policy enabled in velocity tracking mode", args.policy_ready_timeout_s)
+        event_log.append(
+            CONTROL_EVENT,
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=1,
+            detail=marker,
+        )
+
+        pulse_holomotion_key(control_file, "left")
+        for _ in range(holomotion_clip_index(args.motion)):
+            pulse_holomotion_key(control_file, "down")
+        event_log.append(
+            "motion_selected",
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=1,
+            detail=f"selected {args.motion} using stock HoloMotion D-pad controls",
+        )
+
+        release_support(run_dir, control_file, event_log, "release simulator support after HoloMotion CONTROL")
+        pulse_holomotion_key(control_file, "b")
+        marker = wait_for_log_marker(
+            policy,
+            policy.log_path,
+            "Switched to motion tracking mode",
+            args.policy_ready_timeout_s,
+        )
+        event_log.append(
+            "motion_playing_observed",
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=0,
+            detail=marker,
+        )
+        time.sleep(args.motion_duration_s)
+    finally:
+        update_control_file(control_file, stop=True)
+        policy.terminate()
+        docker_rm_force(name)
+
+
+def run_motion(args: argparse.Namespace) -> int:
+    run_dir = Path(args.logs) / args.policy / args.motion
+    if not run_dir.is_absolute():
+        run_dir = ROOT / run_dir
+    run_dir.mkdir(parents=True, exist_ok=True)
+    control_file = run_dir / "sim_control.json"
+    event_path = run_dir / "sequence_events.csv"
+    if event_path.exists():
+        event_path.unlink()
+    event_log = SequenceEventLog(event_path)
+    args.motion_duration_s = args.duration_s or policy_motion_duration(args.policy, args.motion)
+    sim_duration = args.motion_duration_s + args.startup_margin_s
+    sim_name = f"wbc-sim-{args.policy}-{args.motion[:24]}-{int(time.time())}"
+    sim = start_simulator(run_dir, control_file, sim_duration, sim_name)
+    try:
+        if args.policy == "sonic":
+            run_sonic_sequence(args, run_dir, control_file, event_log)
+        else:
+            run_holomotion_sequence(args, run_dir, control_file, event_log)
+        validate_release_order(run_dir)
+    finally:
+        update_control_file(control_file, stop=True)
+        sim.terminate()
+        docker_rm_force(sim_name)
+    print(json.dumps({"ok": True, "policy": args.policy, "motion": args.motion, "run_dir": str(run_dir)}, indent=2))
+    return 0
+
+
+def run_all_motions(args: argparse.Namespace) -> int:
+    failures = []
+    for motion in MOTIONS:
+        for policy in POLICIES:
+            sub_args = argparse.Namespace(**vars(args))
+            sub_args.policy = policy
+            sub_args.motion = motion
+            try:
+                run_motion(sub_args)
+            except Exception as exc:
+                failures.append(f"{policy}/{motion}: {exc}")
+    print(json.dumps({"ok": not failures, "failures": failures}, indent=2))
+    return 0 if not failures else 1
+
+
 def git_output(args: list[str], cwd: Path) -> str:
     return subprocess.check_output(
         ["git", "-c", f"safe.directory={cwd}", *args], cwd=cwd, text=True
@@ -1049,6 +1498,22 @@ def main(argv: Iterable[str] | None = None) -> int:
     p.add_argument("--logs", default=str(ROOT / "logs"))
     p.add_argument("--artifacts", default=str(ROOT / "artifacts"))
     p.set_defaults(func=report)
+    p = sub.add_parser("run-motion")
+    p.add_argument("policy", choices=POLICIES)
+    p.add_argument("motion", choices=MOTIONS)
+    p.add_argument("--logs", default=str(ROOT / "logs"))
+    p.add_argument("--duration-s", type=float, default=0.0)
+    p.add_argument("--startup-margin-s", type=float, default=12.0)
+    p.add_argument("--policy-ready-timeout-s", type=float, default=120.0)
+    p.add_argument("--holomotion-default-wait-s", type=float, default=5.0)
+    p.set_defaults(func=run_motion)
+    p = sub.add_parser("run-all-motions")
+    p.add_argument("--logs", default=str(ROOT / "logs"))
+    p.add_argument("--duration-s", type=float, default=0.0)
+    p.add_argument("--startup-margin-s", type=float, default=12.0)
+    p.add_argument("--policy-ready-timeout-s", type=float, default=120.0)
+    p.add_argument("--holomotion-default-wait-s", type=float, default=5.0)
+    p.set_defaults(func=run_all_motions)
     p = sub.add_parser("docker-build")
     p.add_argument("image", choices=["gear-sonic", "holomotion", "unitree_mujoco"])
     p.set_defaults(func=docker)
