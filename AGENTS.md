@@ -44,17 +44,15 @@ Results will be reviewed by Claude Opus 4.6 and a human expert in embodied intel
 
 2. **Dockerfiles stay as close as possible to the original environment** — follow each repo's official docs. Prefer installing dependencies and using pre-existing scripts from upstream repos over writing custom scripts. Robotic research debugging without vision is very hard; staying close to official repos/documents is the only safe path.
 
-3. **No here-doc or printf inside any Dockerfile.** If an upstream script needs modification, modify it directly in `thirdparties/` and commit there.
+3. **Dockerfiles contain no scripts.** All scripts live in `scripts/` and are mounted into containers at runtime via `-v`. Dockerfiles are pure environment builds — no entrypoint logic, no control flow, no embedded scripts. Every line in a Dockerfile installs a dependency, copies a file from `thirdparties/`, or sets an environment variable. You should not inline scripts inside Dockerfile, and `printf` and here-doc is disabled.
 
-4. **Dockerfiles contain no scripts.** All scripts live in `scripts/` and are mounted into containers at runtime via `-v`. Dockerfiles are pure environment builds — no entrypoint logic, no control flow, no embedded scripts. Every line in a Dockerfile installs a dependency, copies a file from `thirdparties/`, or sets an environment variable.
+4. **Reproducible from scratch.** Anyone who clones the repo recursively and runs `download.sh` must be able to reproduce all results by running `run.sh` then `report.sh`. No manual steps, no host pre-configuration beyond Docker + Python + bash.
 
-5. **Reproducible from scratch.** Anyone who clones the repo recursively and runs `download.sh` must be able to reproduce all results by running `run.sh` then `report.sh`. No manual steps, no host pre-configuration beyond Docker + Python + bash.
+5. **Bronze tier or better.** If even Bronze can't be reached while satisfying the RMSE gate, prove impossibility and exit.
 
-6. **Bronze tier or better.** If even Bronze can't be reached while satisfying the RMSE gate, prove impossibility and exit.
+6. **Host requires minimal dependencies.** No venv, no ROS2/DDS on the host. Only Docker, Python (standard library + common packages like numpy/matplotlib), and standard bash tools. All heavyweight runtimes (ROS2, DDS, MuJoCo, PyTorch, ONNX Runtime) live exclusively inside Docker containers.
 
-7. **Host requires minimal dependencies.** No venv, no ROS2/DDS on the host. Only Docker, Python (standard library + common packages like numpy/matplotlib), and standard bash tools. All heavyweight runtimes (ROS2, DDS, MuJoCo, PyTorch, ONNX Runtime) live exclusively inside Docker containers.
-
-8. After `report.sh` completes, `artifacts/` must contain:
+7. After `report.sh` completes, `artifacts/` must contain:
    - Proof that phase time = wall time = sim time
    - Mean joint RMSE < 0.2 for both policies, all 10 motions (or documented impossibility)
    - Tracking delay per policy per motion (should fall within -0.2s ~ 0.2s; positive preferred, prior estimate ~0.04s)
@@ -84,9 +82,12 @@ wbc-benchmark/
 
 1. unitree_mujoco runs as shared simulator; HoloMotion and SONIC connect to it as control policies.
 2. Event transport via ROS2 or DDS — use whatever the policy already listens to. These repos should not require source changes to run (preliminary tests indicate they work stock).
-3. Timing events: SELECT_MOTION, CONTROL at 1s, RELEASE at 2s, START_POLICY at 3s, motion ends at nominal clip duration.
-4. Be lazy — search the web, check GitHub issues, find existing repos and Dockerfiles that can be reused. Only write custom code when necessary and you know exactly what you're doing. Error-prone to implement from scratch.
+3. Timing events: SELECT_MOTION, CONTROL at 1s, RELEASE at 2s, START_POLICY at 3s, motion ends at nominal clip duration. This is an example, you just need to form such explicit timing, and the timing starts when everything is ready (simulation & policy both running).
+4. Be lazy — search the web, check GitHub issues, find existing repos and Dockerfiles that can be reused. Only write custom code when necessary and you know exactly what you're doing. Error-prone to implement from scratch. Specifically for robot elastic band & releasing methods, follow strictly to recommended workflow in HoloMotion or SONIC. This work is basically reproducing Internet works and it's always good to follow pre-existing documentations.
 5. Tiering is a general template. Some repos may need mandatory changes to run in Docker. But these two (HoloMotion, SONIC) should work without stock changes if preliminary tests are correct.
-6. Each agent/session should focus on exactly one atomic, clear task. Each atomic task corresponds to exactly one git commit. No multi-tasking within a single commit — keep changes small, reviewable, and semantically coherent.
+6. Each agent/session should focus on exactly one atomic, clear task. Each atomic task corresponds to exactly one git commit. No multi-tasking within a single commit — keep changes small, reviewable, and semantically coherent. For each atomic task, make a git commit.
 7. Ideal structure: stock GR00T & HoloMotion deploy runs in the "lo" network interface with zero code changes. unitree_mujoco runs in its own Docker container with a lightweight data collector (sample at ≤50 Hz; do not over-collect — too much data prevents simulation time from keeping pace with wall time). `run.sh` is a thin orchestrator that sends key events or virtual joystick events to deploy/simulator containers. `report.sh` shells into the simulator container to generate video and metrics.
-8. These guidelines describe what great looks like, but they are not assessment rules. Do not use hacky workarounds to technically satisfy a line count or tier while violating the spirit of the benchmark. Claude Opus 4.6 and a human expert in embodied intelligence will review the final result — adhere to sound engineering principles throughout.
+8. These guidelines describe what great looks like, but they are not assessment rules. Do not use hacky workarounds to technically satisfy a line count or tier while violating the spirit of the benchmark. Claude Opus 4.6 and a human expert in embodied intelligence will review the final result — adhere to sound engineering principles throughout. Do no deliberately compress code.
+9. Use Docker build cache aggressively, for example if missing dependencies but previous heavy step passes, add a separate RUN later instead of changing previous RUN, merge & sanitize only when the full Dockerfile builds. Also always prefer to use China mirrors in http.
+10. Motion clips are generated with `thirdparties/run-sonic`, specifically some verification scripts inside. but that repo is too large and contains lots of self-implemented stuff, and it's using simulation path inside GR00T repo instead of isolated unitree_mujoco, and it's for comparing HoloMotion v1.2 and SONIC. Now that HoloMotion is updated to v1.3, I think it's better to more strictly adhere to HoloMotion deploy guideline instead of making our own DDS deployer. Although `run-sonic` is actually runnable and proves these motions can be tracked under RMSE 0.2 rads, your task this time is essentially making it cleaner and runnable.
+11. You have `docker` group. Avoid changing the host environment if possible, at most install some Python dependencies for host-running scripts.
