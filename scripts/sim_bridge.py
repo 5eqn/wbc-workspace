@@ -609,6 +609,8 @@ def main() -> int:
     status_f, lowcmd_f, status_writer, lowcmd_writer = open_logs(out_dir, model.nu)
     started_wall = time.time()
     started_mono = time.monotonic()
+    sync_mono = started_mono
+    sync_sim = float(data.time)
     next_log_t = 0.0
     log_dt = 1.0 / args.log_hz
     step = 0
@@ -650,8 +652,9 @@ def main() -> int:
                 bridge.publish()
 
             if data.time + 1e-9 >= next_log_t:
-                now_wall = started_wall + elapsed
                 now_mono = time.monotonic()
+                elapsed = now_mono - started_mono
+                now_wall = time.time()
                 cmd_count = 0
                 cmd_age_s = ""
                 cmd_q_rms = ""
@@ -722,7 +725,7 @@ def main() -> int:
                 lowcmd_f.flush()
                 next_log_t += log_dt
 
-            sleep_s = args.dt - (time.monotonic() - started_mono - elapsed)
+            sleep_s = sync_mono + (float(data.time) - sync_sim) - time.monotonic()
             if sleep_s > 0:
                 time.sleep(sleep_s)
             step += 1
