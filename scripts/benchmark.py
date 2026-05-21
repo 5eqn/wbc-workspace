@@ -910,6 +910,54 @@ def smoke_sonic_build(_: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def smoke_sim_bridge(_: argparse.Namespace) -> int:
+    script = (
+        "rm -rf /tmp/wbc-sim-bridge && "
+        "python3 /workspace/wbc/scripts/sim_bridge.py "
+        "--sim-root /workspace/unitree_mujoco "
+        "--robot g1 "
+        "--interface lo "
+        "--duration-s 0.25 "
+        "--dt 0.005 "
+        "--log-hz 50 "
+        "--out-dir /tmp/wbc-sim-bridge && "
+        "test -s /tmp/wbc-sim-bridge/lowcmd.csv && "
+        "test -s /tmp/wbc-sim-bridge/simulator_status.csv && "
+        "python3 - <<'PY'\n"
+        "import csv\n"
+        "from pathlib import Path\n"
+        "root = Path('/tmp/wbc-sim-bridge')\n"
+        "rows = list(csv.DictReader((root / 'simulator_status.csv').open()))\n"
+        "assert len(rows) >= 5, len(rows)\n"
+        "assert all(row['support_active'] == '1' for row in rows)\n"
+        "lowcmd = list(csv.DictReader((root / 'lowcmd.csv').open()))\n"
+        "assert len(lowcmd) >= 5, len(lowcmd)\n"
+        "assert 'measured_q_28' in lowcmd[0]\n"
+        "PY"
+    )
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "-v",
+        f"{ROOT}:/workspace/wbc",
+        "wbc-unitree_mujoco",
+        "bash",
+        "-lc",
+        script,
+    ]
+    proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    payload = {
+        "ok": proc.returncode == 0,
+        "image": "wbc-unitree_mujoco",
+        "returncode": proc.returncode,
+        "stdout": proc.stdout.strip(),
+        "stderr": proc.stderr.strip(),
+    }
+    print(json.dumps(payload, indent=2))
+    return 0 if payload["ok"] else 1
+
+
 def docker(args: argparse.Namespace) -> int:
     image = f"wbc-{args.image}"
     dockerfile = ROOT / "docker" / f"{args.image}.Dockerfile"
@@ -926,6 +974,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     sub.add_parser("validate-deploy").set_defaults(func=validate_deploy)
     sub.add_parser("validate-images").set_defaults(func=validate_images)
     sub.add_parser("smoke-release-gate").set_defaults(func=smoke_release_gate)
+    sub.add_parser("smoke-sim-bridge").set_defaults(func=smoke_sim_bridge)
     sub.add_parser("smoke-holomotion").set_defaults(func=smoke_holomotion)
     sub.add_parser("smoke-sonic-build").set_defaults(func=smoke_sonic_build)
     p = sub.add_parser("report")
