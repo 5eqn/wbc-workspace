@@ -801,6 +801,8 @@ def validate_images(_: argparse.Namespace) -> int:
             "wbc-unitree_mujoco",
             "python3 - <<'PY'\n"
             "import imageio, mujoco, numpy, scipy\n"
+            "import cyclonedds, unitree_sdk2py\n"
+            "from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_\n"
             "from pathlib import Path\n"
             "assert Path('/workspace/unitree_mujoco/simulate').exists()\n"
             "PY\n"
