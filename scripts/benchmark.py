@@ -1375,6 +1375,18 @@ def simulator_reference_args(policy: str, motion: str) -> list[str]:
     ]
 
 
+def simulator_scene_args(policy: str) -> list[str]:
+    if policy == "sonic":
+        scene = ROOT / "thirdparties" / "GR00T-WholeBodyControl" / "gear_sonic_deploy" / "g1" / "scene_29dof.xml"
+    else:
+        scene = ROOT / "thirdparties" / "HoloMotion" / "assets" / "robots" / "unitree" / "G1" / "29dof" / "scene_29dof.xml"
+    return ["--scene", f"/workspace/wbc/{scene.relative_to(ROOT)}"]
+
+
+def simulator_domain_args(policy: str) -> list[str]:
+    return ["--domain-id", "0" if policy == "sonic" else "1"]
+
+
 def start_simulator(run_dir: Path, control_file: Path, duration_s: float, name: str, policy: str, motion: str) -> ManagedProcess:
     docker_rm_force(name)
     cmd = docker_base_args(name, SIM_IMAGE) + [
@@ -1384,8 +1396,6 @@ def start_simulator(run_dir: Path, control_file: Path, duration_s: float, name: 
         "/workspace/unitree_mujoco",
         "--robot",
         "g1",
-        "--scene",
-        "/workspace/unitree_mujoco/unitree_robots/g1/scene_29dof.xml",
         "--interface",
         "lo",
         "--duration-s",
@@ -1398,7 +1408,7 @@ def start_simulator(run_dir: Path, control_file: Path, duration_s: float, name: 
         f"/workspace/wbc/{run_dir.relative_to(ROOT)}",
         "--control-file",
         f"/workspace/wbc/{control_file.relative_to(ROOT)}",
-    ] + simulator_reference_args(policy, motion)
+    ] + simulator_domain_args(policy) + simulator_scene_args(policy) + simulator_reference_args(policy, motion)
     proc = ManagedProcess(cmd, run_dir / "simulator_stdout.log")
     proc.start()
     wait_for_file(control_file, 10.0)

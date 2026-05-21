@@ -220,13 +220,11 @@ def load_upstream_bridge(sim_root: Path, robot: str):
     )
     from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_  # type: ignore
     from unitree_sdk2py.idl.unitree_hg.msg.dds_ import BmsState_, IMUState_, LowCmd_, LowState_  # type: ignore
-    from unitree_sdk2py_bridge import UnitreeSdk2Bridge  # type: ignore
 
     return {
         "ChannelFactoryInitialize": ChannelFactoryInitialize,
         "ChannelPublisher": ChannelPublisher,
         "ChannelSubscriber": ChannelSubscriber,
-        "UnitreeSdk2Bridge": UnitreeSdk2Bridge,
         "LowCmd": LowCmd_,
         "LowState": LowState_,
         "SportModeState": SportModeState_,
@@ -281,20 +279,16 @@ class UnitreeG1Bridge:
 
         self.latest_cmd = sdk["LowCmdDefault"]()
         self.received_cmd = False
+        self.cmd_count = 0
+        self.last_cmd_monotonic: float | None = None
         self.cmd_lock = threading.Lock()
         self.low_state = sdk["LowStateDefault"]()
         self.low_state.mode_machine = 5
 
-        self.upstream = sdk["UnitreeSdk2Bridge"](model, data)
-        if hasattr(self.upstream.lowStateThread, "Stop"):
-            self.upstream.lowStateThread.Stop()
-        if hasattr(self.upstream.HighStateThread, "Stop"):
-            self.upstream.HighStateThread.Stop()
-        if hasattr(self.upstream.WirelessControllerThread, "Stop"):
-            self.upstream.WirelessControllerThread.Stop()
-        self.upstream.LowCmdHandler = self.low_cmd_handler
-        self.low_state_pub = self.upstream.low_state_puber
-        self.low_cmd_sub = self.upstream.low_cmd_suber
+        self.low_state_pub = sdk["ChannelPublisher"]("rt/lowstate", sdk["LowState"])
+        self.low_state_pub.Init()
+        self.low_cmd_sub = sdk["ChannelSubscriber"]("rt/lowcmd", sdk["LowCmd"])
+        self.low_cmd_sub.Init(self.low_cmd_handler, 10)
 
         self.sport_state = sdk["SportModeStateDefault"]()
         self.sport_state_pub = sdk["ChannelPublisher"]("rt/sportmodestate", sdk["SportModeState"])
@@ -327,6 +321,8 @@ class UnitreeG1Bridge:
         with self.cmd_lock:
             self.latest_cmd = msg
             self.received_cmd = True
+            self.cmd_count += 1
+            self.last_cmd_monotonic = time.monotonic()
 
     def apply_control(self, precontrol_hold: bool) -> None:
         q = self.body_q()
@@ -434,6 +430,11 @@ def open_logs(out_dir: Path, num_motor: int):
             "sim_time_s",
             "support_active",
             "cmd_received",
+            "cmd_count",
+            "cmd_age_s",
+            "cmd_q_rms",
+            "cmd_kp_mean",
+            "cmd_target_error_rms",
             "ctrl_rms",
             "wireless_keys",
             "base_z",
@@ -458,7 +459,7 @@ def main() -> int:
     parser.add_argument("--robot", default="g1")
     parser.add_argument("--scene", default="")
     parser.add_argument("--interface", default="lo")
-    parser.add_argument("--domain-id", type=int, default=1)
+    parser.add_argument("--domain-id", type=int, default=0)
     parser.add_argument("--duration-s", type=float, default=2.0)
     parser.add_argument("--dt", type=float, default=0.005)
     parser.add_argument("--log-hz", type=float, default=50.0)
@@ -540,18 +541,7 @@ def main() -> int:
                 write_control(control_path, control)
             keys = one_shot_keys or int(control.get("wireless_keys", 0))
             support_active = bool(control.get("support_active", True))
-            set_wireless_remote(
-                bridge.low_state,
-                keys,
-                float(control.get("lx", 0.0)),
-                float(control.get("ly", 0.0)),
-                float(control.get("rx", 0.0)),
-                float(control.get("ry", 0.0)),
-            )
-            bridge.publish()
-            ctrl_rms_before_hold = float((data.ctrl @ data.ctrl / max(1, data.ctrl.size)) ** 0.5)
-            if support_active and ctrl_rms_before_hold <= 1e-6:
-                bridge.apply_control(precontrol_hold=True)
+            bridge.apply_control(precontrol_hold=support_active)
 
             if support_active:
                 data.qpos[:7] = support_root_qpos
@@ -562,15 +552,49 @@ def main() -> int:
                 data.qpos[:7] = support_root_qpos
                 data.qvel[:6] = support_root_qvel
                 mujoco.mj_forward(model, data)
+            set_wireless_remote(
+                bridge.low_state,
+                keys,
+                float(control.get("lx", 0.0)),
+                float(control.get("ly", 0.0)),
+                float(control.get("rx", 0.0)),
+                float(control.get("ry", 0.0)),
+            )
+            bridge.publish()
 
             if data.time + 1e-9 >= next_log_t:
                 now_wall = started_wall + elapsed
+                now_mono = time.monotonic()
+                cmd_count = 0
+                cmd_age_s = ""
+                cmd_q_rms = ""
+                cmd_kp_mean = ""
+                cmd_target_error_rms = ""
+                with bridge.cmd_lock:
+                    cmd_received = bridge.received_cmd
+                    cmd_count = bridge.cmd_count
+                    if bridge.last_cmd_monotonic is not None:
+                        cmd_age_s = f"{now_mono - bridge.last_cmd_monotonic:.6f}"
+                    if bridge.received_cmd:
+                        cmd_q = [float(bridge.latest_cmd.motor_cmd[i].q) for i in range(bridge.num_motor)]
+                        cmd_kp = [float(bridge.latest_cmd.motor_cmd[i].kp) for i in range(bridge.num_motor)]
+                        measured_q = bridge.body_q()
+                        cmd_q_rms = f"{float((sum(v * v for v in cmd_q) / bridge.num_motor) ** 0.5):.6f}"
+                        cmd_kp_mean = f"{float(sum(cmd_kp) / bridge.num_motor):.6f}"
+                        cmd_target_error_rms = (
+                            f"{float((sum((cmd_q[i] - measured_q[i]) ** 2 for i in range(bridge.num_motor)) / bridge.num_motor) ** 0.5):.6f}"
+                        )
                 status_writer.writerow({
                     "monotonic_s": f"{elapsed:.6f}",
                     "wall_time_s": f"{now_wall:.6f}",
                     "sim_time_s": f"{data.time:.6f}",
                     "support_active": int(support_active),
-                    "cmd_received": int(bridge.received_cmd or ctrl_rms_before_hold > 1e-6),
+                    "cmd_received": int(cmd_received),
+                    "cmd_count": cmd_count,
+                    "cmd_age_s": cmd_age_s,
+                    "cmd_q_rms": cmd_q_rms,
+                    "cmd_kp_mean": cmd_kp_mean,
+                    "cmd_target_error_rms": cmd_target_error_rms,
                     "ctrl_rms": f"{float((data.ctrl @ data.ctrl / max(1, data.ctrl.size)) ** 0.5):.6f}",
                     "wireless_keys": keys,
                     "base_z": f"{float(data.qpos[2]):.6f}",
@@ -591,12 +615,6 @@ def main() -> int:
     finally:
         status_f.close()
         lowcmd_f.close()
-        if hasattr(bridge.upstream.lowStateThread, "Stop"):
-            bridge.upstream.lowStateThread.Stop()
-        if hasattr(bridge.upstream.HighStateThread, "Stop"):
-            bridge.upstream.HighStateThread.Stop()
-        if hasattr(bridge.upstream.WirelessControllerThread, "Stop"):
-            bridge.upstream.WirelessControllerThread.Stop()
 
     (out_dir / "sim_bridge_summary.json").write_text(
         json.dumps({
