@@ -54,7 +54,9 @@ Results will be reviewed by Claude Opus 4.6 and a human expert in embodied intel
 
 7. **`thirdparties/run-sonic/` is read-only reference material.** You may inspect its docs and scripts to understand proven workflows, timing checks, joint-order handling, metrics, and video rendering, but benchmark execution must not depend on running code from `thirdparties/run-sonic/`, and you must not modify it. Any benchmark-owned implementation scripts must live flat in the root `scripts/` directory; do not add script subdirectories and do not place new executable glue under `thirdparties/`.
 
-8. After `report.sh` completes, `artifacts/` must contain:
+8. **Elastic-band/support release order is mandatory.** The robot must remain supported until the policy/controller has reached active `CONTROL`, then the elastic band/support must be released, and only after confirmed release may the benchmark start the acting motion/playback. Releasing before `CONTROL`, or starting motion before confirmed release, invalidates the run even if RMSE is low. Use `thirdparties/run-sonic/` only as read-only reference material for the proven no-fall release workflow and event-order checks.
+
+9. After `report.sh` completes, `artifacts/` must contain:
    - Proof that phase time = wall time = sim time
    - Mean joint RMSE < 0.2 for both policies, all 10 motions (or documented impossibility)
    - Tracking delay per policy per motion (should fall within -0.2s ~ 0.2s; positive preferred, prior estimate ~0.04s)
