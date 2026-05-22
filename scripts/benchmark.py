@@ -1488,13 +1488,7 @@ def simulator_reference_args(policy: str, motion: str) -> list[str]:
             "--init-reference-format",
             "sonic_csv",
         ]
-    reference = ROOT / "assets" / "motions" / "holomotion_motions" / f"{motion}_holomotion.npz"
-    return [
-        "--init-reference",
-        f"/workspace/wbc/{reference.relative_to(ROOT)}",
-        "--init-reference-format",
-        "holomotion_npz",
-    ]
+    return []
 
 
 def simulator_scene_args(policy: str) -> list[str]:
