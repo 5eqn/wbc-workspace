@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mkdir -p "$ROOT_DIR/artifacts"
 
 docker run --rm \
+  -e MUJOCO_GL=osmesa \
   -v "$ROOT_DIR:/workspace/wbc" \
   -w /workspace/wbc \
   wbc-unitree_mujoco \

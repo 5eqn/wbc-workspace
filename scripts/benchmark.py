@@ -60,6 +60,7 @@ EVENT_LOG_FIELDS = [
 HOLOMOTION_MIN_TAG = "v1.3.0"
 SONIC_DEPLOY = ROOT / "thirdparties" / "GR00T-WholeBodyControl" / "gear_sonic_deploy"
 HOLO_DEPLOY = ROOT / "thirdparties" / "HoloMotion" / "deployment" / "unitree_g1_ros2_29dof"
+COMMON_SIM_SCENE = ROOT / "thirdparties" / "unitree_mujoco" / "unitree_robots" / "g1" / "scene_29dof.xml"
 SIM_IMAGE = "wbc-unitree_mujoco"
 SONIC_IMAGE = "wbc-gear-sonic"
 HOLO_IMAGE = "wbc-holomotion"
@@ -545,7 +546,7 @@ def load_replay(run_dir: Path) -> dict:
         header = list(reader.fieldnames or [])
         qpos_cols = indexed_columns(header, "qpos_")
         qvel_cols = indexed_columns(header, "qvel_")
-        measured_cols = indexed_columns(header, "measured_q_")
+        measured_cols = indexed_columns(header, "measured_q_")[:29]
         if len(qpos_cols) < 7:
             raise ValueError(f"{path}: replay log has no full floating-root qpos")
         rows = list(reader)
@@ -1086,7 +1087,7 @@ def make_comparison_video(logs: Path, artifacts: Path, motion: str, row: dict) -
         replay = load_replay(run_dir)
         events = load_events(run_dir)
         window = validate_replay_window(policy, motion, run_dir, replay, events)
-        scene = policy_scene_path(policy)
+        scene = logged_scene_path(replay)
         model = mujoco.MjModel.from_xml_path(str(scene))
         data = mujoco.MjData(model)
         renderer = mujoco.Renderer(model, height=480, width=640)
@@ -1870,19 +1871,17 @@ def simulator_reference_args(policy: str, motion: str) -> list[str]:
 
 
 def policy_scene_path(policy: str) -> Path:
-    if policy == "sonic":
-        return (
-            ROOT
-            / "thirdparties"
-            / "GR00T-WholeBodyControl"
-            / "gear_sonic"
-            / "data"
-            / "robot_model"
-            / "model_data"
-            / "g1"
-            / "scene_43dof.xml"
-        )
-    return ROOT / "thirdparties" / "HoloMotion" / "assets" / "robots" / "unitree" / "G1" / "29dof" / "scene_29dof.xml"
+    del policy
+    return COMMON_SIM_SCENE
+
+
+def logged_scene_path(replay: dict) -> Path:
+    scene = str(replay["summary"].get("scene", ""))
+    if not scene:
+        raise ValueError(f"{replay['path']}: sim_bridge_summary.json has no scene")
+    if scene.startswith("/workspace/wbc/"):
+        return ROOT / scene.removeprefix("/workspace/wbc/")
+    return Path(scene)
 
 
 def simulator_scene_args(policy: str) -> list[str]:
