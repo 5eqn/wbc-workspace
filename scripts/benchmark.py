@@ -43,7 +43,7 @@ RELEASE_EVENT_LOGS = ["sequence_events.csv", "holomotion_sequence_events.csv"]
 CONTROL_EVENT = "control_state_observed"
 RELEASE_REQUEST_EVENT = "release_file_touched"
 RELEASE_CONFIRMED_EVENT = "support_release_confirmed"
-PLAYBACK_EVENTS = ["sent_key_T", "motion_start_observed", "motion_playing_observed"]
+PLAYBACK_EVENTS = ["sent_key_T", "sent_key_B", "motion_start_observed", "motion_playing_observed"]
 EVENT_LOG_FIELDS = [
     "event",
     "monotonic_s",
@@ -1687,6 +1687,12 @@ def run_holomotion_sequence(args: argparse.Namespace, run_dir: Path, control_fil
 
         wait_for_pre_release_hold(run_dir, event_log)
         release_support(run_dir, control_file, event_log, "release simulator support after HoloMotion CONTROL")
+        event_log.append(
+            "sent_key_B",
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=0,
+            detail="stock HoloMotion motion tracking trigger after confirmed release",
+        )
         pulse_holomotion_key(control_file, "b")
         marker = wait_for_log_marker(
             policy,
