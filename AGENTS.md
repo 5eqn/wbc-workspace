@@ -97,6 +97,8 @@ These are operational hints, not substitutes for the hard gates. Add new hints h
 7. For lower/release details, inspect `thirdparties/run-sonic/release_to_ground.sh` as read-only reference material and translate only the minimum necessary workflow into flat root `scripts/`.
 8. Validate the control/lower/release workflow independently before motion tracking: direct release before control should fall; entering control, lowering, and releasing should stand for more than 5 seconds; stopping the control policy after stable release should fall within about 2 seconds.
 9. Stop a test early when the robot has clearly fallen. A fallen run should be marked failed immediately rather than allowed to continue and contaminate timing or metrics.
+10. HoloMotion v1.3 stock deploy still failed `dance_chicken_c03_neutral2s` after initializing the simulator from that HoloMotion NPZ frame 0; the run reached valid release order, then fell during motion tracking with RMSE around `0.421`. Root initialization alone is not the missing contract.
+11. HoloMotion v1.3 stock deploy with simulator `--publish-every 4` missed the current one-shot D-pad clip-selection pulse and timed out before release. Keep HoloMotion at the current higher low-state publish cadence unless the selection transport is changed deliberately.
 
 ## Hints (not requirements)
 
