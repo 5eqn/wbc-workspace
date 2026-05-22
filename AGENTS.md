@@ -84,6 +84,20 @@ wbc-benchmark/
 
 `scripts/` has no subdirectories. Extra dependency files live flat alongside run.sh and report.sh, and count toward the tier limit.
 
+## Runtime hints
+
+These are operational hints, not substitutes for the hard gates. Add new hints here whenever a run reveals useful, reproducible knowledge that helps future agents avoid repeating mistakes.
+
+1. Treat one policy + one motion as the atomic validation unit. Do not assess the full batch until one motion is correct.
+2. Restart both simulator and policy for every motion. Avoid persistent host-network simulator or policy processes that can contaminate DDS/ROS traffic between runs.
+3. For a single-motion run, launch the simulator first and verify it is ready with minimal deviation from stock `unitree_mujoco` behavior, because the simulator is standing in for the real robot low-level interface.
+4. Launch the stock policy second through its official deploy path, then wait until the policy model/control graph is fully loaded and ready. Start benchmark timing only after both simulator and policy are ready.
+5. Use a fixed nominal timing sequence after readiness: motion selection, control entry, lower/support preparation, release, then motion start/playback.
+6. Gold path: drive policy mode selection through simulated Xbox joystick/wireless-remote input, and drive lower/release through the simulator's intended GLFW/key input path. Silver path: use the least intrusive benchmark-owned control mechanism that still preserves stock deploy behavior.
+7. For lower/release details, inspect `thirdparties/run-sonic/release_to_ground.sh` as read-only reference material and translate only the minimum necessary workflow into flat root `scripts/`.
+8. Validate the control/lower/release workflow independently before motion tracking: direct release before control should fall; entering control, lowering, and releasing should stand for more than 5 seconds; stopping the control policy after stable release should fall within about 2 seconds.
+9. Stop a test early when the robot has clearly fallen. A fallen run should be marked failed immediately rather than allowed to continue and contaminate timing or metrics.
+
 ## Hints (not requirements)
 
 1. unitree_mujoco runs as shared simulator; HoloMotion and SONIC connect to it as control policies.
