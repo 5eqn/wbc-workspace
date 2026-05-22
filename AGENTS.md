@@ -62,7 +62,9 @@ Results will be reviewed by Claude Opus 4.6 and a human expert in embodied intel
    - Proof that phase time = wall time = sim time
    - Mean joint RMSE < 0.2 for both policies, all 10 motions (or documented impossibility)
    - Tracking delay per policy per motion (should fall within -0.2s ~ 0.2s; positive preferred, prior estimate ~0.04s)
-   - Side-by-side comparison video (HoloMotion vs SONIC, reference ghost overlay, metrics burned in)
+   - One valid MuJoCo-rerendered side-by-side comparison MP4 per motion
+
+11. **Comparison videos are a hard gate and must be MuJoCo rerenders, not plots.** `report.sh` must fail if any required comparison video is missing, unreadable, generated from plots/traces instead of MuJoCo robot rendering, or uses the wrong time interval. For each of the 10 motions, `artifacts/` must contain one side-by-side HoloMotion-vs-SONIC MP4 rendered by loading the robot MJCF in MuJoCo, replaying the measured robot joint trajectory for each policy, and drawing a reference ghost overlay from the corresponding reference motion. Metrics and event labels must be burned into the video. The rendered timeline starts at nominal phase time `0` after simulator+policy readiness, includes CONTROL entry, lower/support preparation, confirmed RELEASE, and only then acting-motion playback; it ends at the acting motion's nominal end, so total video duration is the pre-playback interval plus the nominal clip duration. A joint-trace plot, matplotlib animation, slideshow, policy-only video, reference-only video, video without ghost overlay, video without metrics, or video that starts at acting-motion playback does not satisfy this gate.
 
 ## Folder structure
 
