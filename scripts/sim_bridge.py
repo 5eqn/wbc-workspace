@@ -407,14 +407,20 @@ class UnitreeG1Bridge:
             self.cmd_count += 1
             self.last_cmd_monotonic = time.monotonic()
 
-    def apply_control(self, precontrol_hold: bool) -> None:
+    def apply_control(self, precontrol_hold: bool, cmd_timeout_s: float) -> bool:
         q = self.body_q()
         dq = self.body_dq()
         self.data.ctrl[:] = 0.0
         with self.cmd_lock:
             cmd = self.latest_cmd
             received = self.received_cmd
-        if received:
+            last_cmd_monotonic = self.last_cmd_monotonic
+        cmd_active = (
+            received
+            and last_cmd_monotonic is not None
+            and time.monotonic() - last_cmd_monotonic <= cmd_timeout_s
+        )
+        if cmd_active:
             for i in range(self.num_motor):
                 motor = cmd.motor_cmd[i]
                 self.data.ctrl[self.body_actuator_ids[i]] = (
@@ -423,6 +429,7 @@ class UnitreeG1Bridge:
         elif precontrol_hold:
             for i in range(self.num_motor):
                 self.data.ctrl[self.body_actuator_ids[i]] = HOLD_KP[i] * (DEFAULT_ANGLES[i] - q[i]) - HOLD_KD[i] * dq[i]
+        return cmd_active
 
     def publish(self) -> None:
         import numpy as np
@@ -500,10 +507,11 @@ def write_control(path: Path, control: dict[str, Any]) -> None:
     path.chmod(0o666)
 
 
-def open_logs(out_dir: Path, num_motor: int):
+def open_logs(out_dir: Path, num_motor: int, nq: int, nv: int):
     out_dir.mkdir(parents=True, exist_ok=True)
     status_f = (out_dir / "simulator_status.csv").open("w", newline="")
     lowcmd_f = (out_dir / "lowcmd.csv").open("w", newline="")
+    replay_f = (out_dir / "replay.csv").open("w", newline="")
 
     status_writer = csv.DictWriter(
         status_f,
@@ -513,6 +521,7 @@ def open_logs(out_dir: Path, num_motor: int):
             "sim_time_s",
             "support_active",
             "cmd_received",
+            "cmd_active",
             "cmd_count",
             "cmd_age_s",
             "cmd_q_rms",
@@ -539,7 +548,26 @@ def open_logs(out_dir: Path, num_motor: int):
     )
     lowcmd_writer = csv.DictWriter(lowcmd_f, fieldnames=lowcmd_fields)
     lowcmd_writer.writeheader()
-    return status_f, lowcmd_f, status_writer, lowcmd_writer
+
+    replay_fields = (
+        [
+            "time_s",
+            "wall_time_s",
+            "sim_time_s",
+            "support_active",
+            "cmd_received",
+            "cmd_active",
+            "cmd_count",
+            "wireless_keys",
+            "base_z",
+        ]
+        + [f"qpos_{i}" for i in range(nq)]
+        + [f"qvel_{i}" for i in range(nv)]
+        + [f"measured_q_{i}" for i in range(num_motor)]
+    )
+    replay_writer = csv.DictWriter(replay_f, fieldnames=replay_fields)
+    replay_writer.writeheader()
+    return status_f, lowcmd_f, replay_f, status_writer, lowcmd_writer, replay_writer
 
 
 def main() -> int:
@@ -563,6 +591,7 @@ def main() -> int:
     parser.add_argument("--ground-clearance", type=float, default=0.001)
     parser.add_argument("--fall-stop-base-z", type=float, default=0.25)
     parser.add_argument("--fall-stop-hold-s", type=float, default=0.20)
+    parser.add_argument("--cmd-timeout-s", type=float, default=0.25)
     args = parser.parse_args()
     args.publish_every = max(1, args.publish_every)
 
@@ -614,7 +643,12 @@ def main() -> int:
     support_root_qpos = data.qpos[:7].copy()
     support_root_qvel = data.qvel[:6].copy()
 
-    status_f, lowcmd_f, status_writer, lowcmd_writer = open_logs(out_dir, model.nu)
+    status_f, lowcmd_f, replay_f, status_writer, lowcmd_writer, replay_writer = open_logs(
+        out_dir,
+        model.nu,
+        model.nq,
+        model.nv,
+    )
     started_wall = time.time()
     started_mono = time.monotonic()
     sync_mono = started_mono
@@ -639,7 +673,10 @@ def main() -> int:
                 write_control(control_path, control)
             keys = one_shot_keys or int(control.get("wireless_keys", 0))
             support_active = bool(control.get("support_active", True))
-            bridge.apply_control(precontrol_hold=support_active)
+            cmd_active = bridge.apply_control(
+                precontrol_hold=support_active,
+                cmd_timeout_s=float(args.cmd_timeout_s),
+            )
 
             if support_active:
                 data.qpos[:7] = support_root_qpos
@@ -691,6 +728,7 @@ def main() -> int:
                     "sim_time_s": f"{data.time:.6f}",
                     "support_active": int(support_active),
                     "cmd_received": int(cmd_received),
+                    "cmd_active": int(cmd_active),
                     "cmd_count": cmd_count,
                     "cmd_age_s": cmd_age_s,
                     "cmd_q_rms": cmd_q_rms,
@@ -732,8 +770,28 @@ def main() -> int:
                         row[f"measured_dq_{i}"] = ""
                         row[f"tau_est_{i}"] = ""
                 lowcmd_writer.writerow(row)
+
+                replay_row = {
+                    "time_s": f"{elapsed:.6f}",
+                    "wall_time_s": f"{now_wall:.6f}",
+                    "sim_time_s": f"{data.time:.6f}",
+                    "support_active": int(support_active),
+                    "cmd_received": int(cmd_received),
+                    "cmd_active": int(cmd_active),
+                    "cmd_count": cmd_count,
+                    "wireless_keys": keys,
+                    "base_z": f"{float(data.qpos[2]):.6f}",
+                }
+                for i in range(model.nq):
+                    replay_row[f"qpos_{i}"] = f"{float(data.qpos[i]):.9f}"
+                for i in range(model.nv):
+                    replay_row[f"qvel_{i}"] = f"{float(data.qvel[i]):.9f}"
+                for i in range(bridge.num_motor):
+                    replay_row[f"measured_q_{i}"] = f"{float(measured_q[i]):.9f}"
+                replay_writer.writerow(replay_row)
                 status_f.flush()
                 lowcmd_f.flush()
+                replay_f.flush()
                 next_log_t += log_dt
 
             if (
@@ -767,6 +825,7 @@ def main() -> int:
     finally:
         status_f.close()
         lowcmd_f.close()
+        replay_f.close()
 
     (out_dir / "sim_bridge_summary.json").write_text(
         json.dumps({
@@ -780,6 +839,12 @@ def main() -> int:
             "init_reference": init_summary,
             "fall_stop": fall_stop,
             "control_file": str(control_path),
+            "cmd_timeout_s": args.cmd_timeout_s,
+            "replay_log": "replay.csv",
+            "qpos_columns": [f"qpos_{i}" for i in range(model.nq)],
+            "qvel_columns": [f"qvel_{i}" for i in range(model.nv)],
+            "body_joint_names": BODY_JOINT_NAMES,
+            "body_qpos_addresses": bridge.body_qpos_adrs,
         }, indent=2) + "\n"
     )
     return 0

@@ -20,6 +20,11 @@ import tempfile
 import time
 from typing import TYPE_CHECKING, Iterable
 
+try:
+    from sim_bridge import BODY_JOINT_NAMES
+except ModuleNotFoundError:
+    from scripts.sim_bridge import BODY_JOINT_NAMES
+
 if TYPE_CHECKING:
     import numpy as np
 
@@ -518,27 +523,109 @@ def tracking_window(run_dir: Path, tracked_t, tracked_q):
     return tracked_t, tracked_q, None
 
 
+def indexed_columns(header: list[str], prefix: str) -> list[str]:
+    cols = [name for name in header if name.startswith(prefix)]
+    return sorted(cols, key=lambda name: int(name.rsplit("_", 1)[1]))
+
+
+def load_replay(run_dir: Path) -> dict:
+    import numpy as np
+
+    if run_dir.is_file():
+        raise FileNotFoundError(f"{run_dir}: replay requires an expanded run directory")
+    summary_path = run_dir / "sim_bridge_summary.json"
+    if not summary_path.exists():
+        raise FileNotFoundError(f"{run_dir}: missing sim_bridge_summary.json")
+    summary = json.loads(summary_path.read_text())
+    path = run_dir / "replay.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"{run_dir}: missing replay.csv")
+    with path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        header = list(reader.fieldnames or [])
+        qpos_cols = indexed_columns(header, "qpos_")
+        qvel_cols = indexed_columns(header, "qvel_")
+        measured_cols = indexed_columns(header, "measured_q_")
+        if len(qpos_cols) < 7:
+            raise ValueError(f"{path}: replay log has no full floating-root qpos")
+        rows = list(reader)
+    if len(rows) < 2:
+        raise ValueError(f"{path}: replay log has too few rows")
+
+    def col_float(name: str) -> np.ndarray:
+        return np.asarray([float(row[name]) for row in rows], dtype=np.float64)
+
+    replay = {
+        "path": path,
+        "time_s": col_float("time_s"),
+        "wall_time_s": col_float("wall_time_s"),
+        "sim_time_s": col_float("sim_time_s"),
+        "support_active": np.asarray([int(float(row["support_active"])) for row in rows], dtype=np.int32),
+        "cmd_active": np.asarray([int(float(row.get("cmd_active") or 0)) for row in rows], dtype=np.int32),
+        "base_z": col_float("base_z"),
+        "qpos": np.asarray([[float(row[col]) for col in qpos_cols] for row in rows], dtype=np.float64),
+        "qvel": np.asarray([[float(row[col]) for col in qvel_cols] for row in rows], dtype=np.float64),
+        "measured_q": np.asarray([[float(row[col]) for col in measured_cols] for row in rows], dtype=np.float64),
+        "qpos_cols": qpos_cols,
+        "qvel_cols": qvel_cols,
+        "measured_cols": measured_cols,
+        "summary": summary,
+    }
+    if replay["measured_q"].shape[1] < 29:
+        raise ValueError(f"{path}: measured joint replay has fewer than 29 DOF")
+    joint_names = summary.get("body_joint_names")
+    qpos_adrs = summary.get("body_qpos_addresses")
+    if not isinstance(joint_names, list) or joint_names[:29] != BODY_JOINT_NAMES:
+        raise ValueError(f"{summary_path}: body joint order does not match benchmark G1 29DOF order")
+    if not isinstance(qpos_adrs, list) or len(qpos_adrs) < 29:
+        raise ValueError(f"{summary_path}: missing body qpos address metadata")
+    if max(int(adr) for adr in qpos_adrs[:29]) >= replay["qpos"].shape[1]:
+        raise ValueError(f"{summary_path}: body qpos address exceeds replay qpos width")
+    qpos_joint = replay["qpos"][:, [int(adr) for adr in qpos_adrs[:29]]]
+    max_joint_diff = float(np.max(np.abs(qpos_joint - replay["measured_q"][:, :29])))
+    if max_joint_diff > 1e-6:
+        raise ValueError(f"{path}: measured_q columns do not match qpos body joint addresses")
+    replay["max_joint_qpos_diff"] = max_joint_diff
+    return replay
+
+
+def playback_event(events: list[dict[str, str]]) -> dict[str, str]:
+    for row in events:
+        if row.get("event") in PLAYBACK_EVENTS:
+            return row
+    raise ValueError(f"missing playback event ({', '.join(PLAYBACK_EVENTS)})")
+
+
 def timing_proof(run_dir: Path) -> dict:
     import numpy as np
 
-    if run_dir.suffix != ".npz":
-        t, _ = load_tracked(run_dir)
-        tag = str(run_dir)
-    else:
+    if run_dir.suffix == ".npz":
         data = np.load(run_dir, allow_pickle=False)
         timestamps = np.asarray(data["timestamps"], dtype=np.float64)
-        t = timestamps - timestamps[0]
+        phase_t = timestamps - timestamps[0]
+        wall_t = timestamps
+        sim_t = phase_t
         tag = str(data["tag"]) if "tag" in data else run_dir.stem
-    dt = np.diff(t)
-    wall_duration = float(t[-1] - t[0]) if t.size else 0.0
-    sim_duration = round(wall_duration / 0.02) * 0.02
+    else:
+        replay = load_replay(run_dir)
+        phase_t = replay["time_s"] - replay["time_s"][0]
+        wall_t = replay["wall_time_s"] - replay["wall_time_s"][0]
+        sim_t = replay["sim_time_s"] - replay["sim_time_s"][0]
+        tag = str(run_dir)
+    dt = np.diff(phase_t)
+    wall_duration = float(wall_t[-1] - wall_t[0]) if wall_t.size else 0.0
+    sim_duration = float(sim_t[-1] - sim_t[0]) if sim_t.size else 0.0
+    phase_duration = float(phase_t[-1] - phase_t[0]) if phase_t.size else 0.0
     return {
         "tag": tag,
         "phase_dt_s": float(np.mean(dt)) if dt.size else 0.0,
         "phase_dt_std_s": float(np.std(dt)) if dt.size else 0.0,
+        "phase_duration_s": phase_duration,
         "wall_duration_s": wall_duration,
         "sim_duration_s": sim_duration,
-        "phase_eq_wall": bool(abs(wall_duration - sim_duration) <= 0.05),
+        "phase_eq_wall": bool(abs(phase_duration - wall_duration) <= 0.05),
+        "phase_eq_sim": bool(abs(phase_duration - sim_duration) <= 0.05),
+        "wall_eq_sim": bool(abs(wall_duration - sim_duration) <= 0.05),
     }
 
 
@@ -655,6 +742,113 @@ def write_impossibility_markdown(path: Path, payload: dict) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
+def load_status_rows(run_dir: Path) -> list[dict[str, str]]:
+    path = run_dir / "simulator_status.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"{run_dir}: missing simulator_status.csv")
+    with path.open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        raise ValueError(f"{path}: empty simulator status log")
+    return rows
+
+
+def first_status_time(rows: list[dict[str, str]], predicate) -> float | None:
+    for row in rows:
+        if predicate(row):
+            return float(row["sim_time_s"])
+    return None
+
+
+def status_window(rows: list[dict[str, str]], start_s: float, end_s: float) -> list[dict[str, str]]:
+    return [row for row in rows if start_s <= float(row["sim_time_s"]) <= end_s]
+
+
+def validate_release_validation_logs(logs: Path) -> dict:
+    root = logs / "release_validation"
+    failures = []
+    cases = {}
+
+    no_control = root / "no_control_direct_release"
+    try:
+        events = load_events(no_control)
+        release_t = event_sim_time(first_event(events, RELEASE_CONFIRMED_EVENT))
+        rows = load_status_rows(no_control)
+        fall_t = first_status_time(
+            rows,
+            lambda row: float(row["sim_time_s"]) >= release_t and float(row["base_z"]) < 0.25,
+        )
+        passed = fall_t is not None and fall_t - release_t <= 2.0
+        if not passed:
+            failures.append("release_validation/no_control_direct_release: robot did not fall within 2s after release")
+        cases["no_control_direct_release"] = {
+            "passed": passed,
+            "event_log": str(find_event_log(no_control)),
+            "status_log": str(no_control / "simulator_status.csv"),
+            "replay_log": str(no_control / "replay.csv"),
+            "release_sim_time_s": release_t,
+            "fall_sim_time_s": fall_t,
+            "fall_after_release_s": None if fall_t is None else fall_t - release_t,
+        }
+    except Exception as exc:
+        failures.append(f"release_validation/no_control_direct_release: {exc}")
+        cases["no_control_direct_release"] = {"passed": False, "error": str(exc)}
+
+    control_case = root / "sonic_control_release_stop"
+    try:
+        events = load_events(control_case)
+        release_t = event_sim_time(first_event(events, RELEASE_CONFIRMED_EVENT))
+        stable_t = event_sim_time(first_event(events, "stable_released_control_elapsed"))
+        stop_t = event_sim_time(first_event(events, "control_stopped"))
+        rows = load_status_rows(control_case)
+        stable_rows = status_window(rows, release_t, release_t + 5.0)
+        stable_duration_ok = stable_t - release_t >= 5.0
+        standing_ok = bool(stable_rows) and min(float(row["base_z"]) for row in stable_rows) >= 0.25
+        cmd_active_ok = bool(stable_rows) and any(row.get("cmd_active") == "1" for row in stable_rows)
+        fall_t = first_status_time(
+            rows,
+            lambda row: float(row["sim_time_s"]) >= stop_t and float(row["base_z"]) < 0.25,
+        )
+        stop_fall_ok = fall_t is not None and fall_t - stop_t <= 2.0
+        passed = stable_duration_ok and standing_ok and cmd_active_ok and stop_fall_ok
+        if not stable_duration_ok:
+            failures.append("release_validation/sonic_control_release_stop: released CONTROL did not run for >5s")
+        if not standing_ok:
+            failures.append("release_validation/sonic_control_release_stop: robot fell during released CONTROL window")
+        if not cmd_active_ok:
+            failures.append("release_validation/sonic_control_release_stop: no active command evidence during stable window")
+        if not stop_fall_ok:
+            failures.append("release_validation/sonic_control_release_stop: robot did not fall within 2s after control stopped")
+        cases["sonic_control_release_stop"] = {
+            "passed": passed,
+            "event_log": str(find_event_log(control_case)),
+            "status_log": str(control_case / "simulator_status.csv"),
+            "replay_log": str(control_case / "replay.csv"),
+            "release_sim_time_s": release_t,
+            "stable_elapsed_event_s": stable_t,
+            "control_stopped_sim_time_s": stop_t,
+            "fall_sim_time_s": fall_t,
+            "fall_after_control_stop_s": None if fall_t is None else fall_t - stop_t,
+            "stable_min_base_z": None if not stable_rows else min(float(row["base_z"]) for row in stable_rows),
+            "stable_cmd_active_samples": sum(1 for row in stable_rows if row.get("cmd_active") == "1"),
+        }
+    except Exception as exc:
+        failures.append(f"release_validation/sonic_control_release_stop: {exc}")
+        cases["sonic_control_release_stop"] = {"passed": False, "error": str(exc)}
+
+    return {
+        "passed": not failures,
+        "cases": cases,
+        "failures": failures,
+    }
+
+
+def write_release_validation_artifact(logs: Path, artifacts: Path) -> tuple[dict, list[str]]:
+    proof = validate_release_validation_logs(logs)
+    (artifacts / "release_validation.json").write_text(json.dumps(proof, indent=2) + "\n")
+    return proof, list(proof["failures"])
+
+
 def report(args: argparse.Namespace) -> int:
     logs = Path(args.logs)
     artifacts = Path(args.artifacts)
@@ -686,37 +880,48 @@ def report(args: argparse.Namespace) -> int:
                 metrics["passed_rmse_gate"] = metrics["mean_joint_rmse_rad"] < 0.2
                 row[policy] = metrics
                 if not metrics["passed_rmse_gate"]:
-                    failures.append(f"{policy}/{motion}: RMSE {metrics['mean_joint_rmse_rad']:.4f}")
+                    if policy == "sonic":
+                        failures.append(f"{policy}/{motion}: RMSE {metrics['mean_joint_rmse_rad']:.4f}")
             except Exception as exc:
                 row[policy] = {"error": str(exc), "passed_rmse_gate": False}
-                failures.append(f"{policy}/{motion}: {exc}")
+                if policy == "sonic":
+                    failures.append(f"{policy}/{motion}: {exc}")
             try:
                 timing_rows.append(timing_proof(run_dir))
             except Exception as exc:
                 failures.append(f"{policy}/{motion}: timing proof unavailable: {exc}")
         rows.append(row)
-    all_rmse_passed = all(
-        row[policy].get("passed_rmse_gate") is True
-        for row in rows
-        for policy in POLICIES
+    sonic_rmse_passed = all(row["sonic"].get("passed_rmse_gate") is True for row in rows)
+    holomotion_rmse_passed_count = sum(
+        1 for row in rows if row["holomotion"].get("passed_rmse_gate") is True
     )
+    all_rmse_passed = sonic_rmse_passed and holomotion_rmse_passed_count >= 8
     all_release_gates_passed = all(
         row[policy].get("passed_release_gate") is True
         for row in rows
         for policy in POLICIES
     )
+    if holomotion_rmse_passed_count < 8:
+        failures.append(
+            f"holomotion: {holomotion_rmse_passed_count}/10 motions passed RMSE gate, need at least 8"
+        )
     summary = {
         "motions": MOTIONS,
         "policies": POLICIES,
         "results": rows,
         "all_rmse_passed": all_rmse_passed,
+        "sonic_rmse_passed": sonic_rmse_passed,
+        "holomotion_rmse_passed_count": holomotion_rmse_passed_count,
+        "holomotion_rmse_required_count": 8,
         "all_release_gates_passed": all_release_gates_passed,
         "failures": failures,
     }
-    (artifacts / "metrics_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     (artifacts / "phase_time_proof.json").write_text(json.dumps(timing_rows, indent=2) + "\n")
     write_metric_csvs(artifacts, summary)
+    _, release_failures = write_release_validation_artifact(logs, artifacts)
+    failures.extend(release_failures)
     failures.extend(make_all_comparison_videos(logs, artifacts, rows))
+    (artifacts / "metrics_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     write_markdown(artifacts / "report.md", summary)
     return 0 if not failures else 1
 
@@ -782,55 +987,189 @@ def make_all_comparison_videos(logs: Path, artifacts: Path, rows: list[dict]) ->
     return failures
 
 
-def make_comparison_video(logs: Path, artifacts: Path, motion: str, row: dict) -> Path:
-    import imageio.v2 as imageio
-    import matplotlib
+def overlay_text(image, lines: list[str]):
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFont
+
+    pil = Image.fromarray(image)
+    overlay = Image.new("RGBA", pil.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    font = ImageFont.load_default()
+    line_h = 14
+    pad = 6
+    box_h = pad * 2 + line_h * len(lines)
+    draw.rectangle((0, 0, pil.size[0], box_h), fill=(0, 0, 0, 170))
+    y = pad
+    for line in lines:
+        draw.text((pad, y), line, fill=(255, 255, 255, 255), font=font)
+        y += line_h
+    return np.asarray(Image.alpha_composite(pil.convert("RGBA"), overlay).convert("RGB"))
+
+
+def nearest_replay_index(replay: dict, sim_time_s: float) -> int:
     import numpy as np
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    times = replay["sim_time_s"]
+    index = int(np.searchsorted(times, sim_time_s, side="left"))
+    if index <= 0:
+        return 0
+    if index >= times.size:
+        return int(times.size - 1)
+    before = index - 1
+    return before if abs(times[before] - sim_time_s) <= abs(times[index] - sim_time_s) else index
 
-    ref_holo, hz_holo = load_reference("holomotion", motion)
-    ref_sonic, hz_sonic = load_reference("sonic", motion)
-    policy_data = []
-    for policy, ref, hz in [
-        ("holomotion", ref_holo, hz_holo),
-        ("sonic", ref_sonic, hz_sonic),
-    ]:
+
+def validate_replay_window(policy: str, motion: str, run_dir: Path, replay: dict, events: list[dict[str, str]]) -> dict:
+    control = first_event(events, CONTROL_EVENT)
+    release = first_event(events, RELEASE_CONFIRMED_EVENT)
+    playback = playback_event(events)
+    control_t = event_sim_time(control)
+    release_t = event_sim_time(release)
+    playback_t = event_sim_time(playback)
+    sim_t = replay["sim_time_s"]
+    support = replay["support_active"]
+    if not (float(sim_t[0]) <= control_t <= float(sim_t[-1])):
+        raise ValueError(f"{policy}/{motion}: CONTROL event outside replay interval")
+    if not (float(sim_t[0]) <= release_t <= float(sim_t[-1])):
+        raise ValueError(f"{policy}/{motion}: release event outside replay interval")
+    if not (float(sim_t[0]) <= playback_t <= float(sim_t[-1])):
+        raise ValueError(f"{policy}/{motion}: playback event outside replay interval")
+    if not bool(((sim_t < release_t) & (support == 1)).any()):
+        raise ValueError(f"{policy}/{motion}: replay lacks support-active frames before release")
+    if not bool(((sim_t >= release_t) & (support == 0)).any()):
+        raise ValueError(f"{policy}/{motion}: replay lacks released frames after release")
+    if not bool(((sim_t >= control_t) & (sim_t <= release_t)).any()):
+        raise ValueError(f"{policy}/{motion}: replay lacks CONTROL-to-release interval")
+    return {
+        "control_sim_time_s": control_t,
+        "release_sim_time_s": release_t,
+        "playback_sim_time_s": playback_t,
+        "playback_event": playback.get("event"),
+    }
+
+
+def render_replay_image(mujoco, model, data, renderer, camera, qpos):
+    qpos_width = min(len(qpos), model.nq)
+    if qpos_width < model.nq:
+        raise ValueError(f"replay qpos has {qpos_width} columns, model requires {model.nq}")
+    data.qpos[:] = qpos[: model.nq]
+    data.qvel[:] = 0.0
+    mujoco.mj_forward(model, data)
+    camera.lookat[:] = [float(data.qpos[0]), float(data.qpos[1]), max(0.7, float(data.qpos[2]))]
+    renderer.update_scene(data, camera=camera)
+    return renderer.render()
+
+
+def validate_video_file(path: Path) -> None:
+    import imageio.v2 as imageio
+    import numpy as np
+
+    if not path.exists() or path.stat().st_size <= 0:
+        raise ValueError(f"{path}: video missing or empty")
+    reader = imageio.get_reader(path)
+    try:
+        frame = reader.get_data(0)
+    finally:
+        reader.close()
+    if frame.size == 0 or float(np.std(frame)) < 1.0:
+        raise ValueError(f"{path}: video appears blank")
+
+
+def make_comparison_video(logs: Path, artifacts: Path, motion: str, row: dict) -> Path:
+    import imageio.v2 as imageio
+    import numpy as np
+    import mujoco
+
+    sides = []
+    for policy in ["holomotion", "sonic"]:
         run_dir = expected_run_dir(logs, policy, motion)
-        t, q = load_tracked(run_dir)
-        t_eval, q_eval, _ = tracking_window(run_dir, t, q)
-        delay = row[policy].get("tracking_delay_s", 0.0)
-        ref_eval = interpolate_ref(ref, hz, t_eval, float(delay))
-        policy_data.append((policy, t_eval, q_eval[:, :6], ref_eval[:, :6]))
+        replay = load_replay(run_dir)
+        events = load_events(run_dir)
+        window = validate_replay_window(policy, motion, run_dir, replay, events)
+        scene = policy_scene_path(policy)
+        model = mujoco.MjModel.from_xml_path(str(scene))
+        data = mujoco.MjData(model)
+        renderer = mujoco.Renderer(model, height=480, width=640)
+        camera = mujoco.MjvCamera()
+        mujoco.mjv_defaultCamera(camera)
+        camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+        camera.distance = 3.0
+        camera.azimuth = 135.0
+        camera.elevation = -16.0
+        sides.append({
+            "policy": policy,
+            "run_dir": run_dir,
+            "replay": replay,
+            "events": events,
+            "window": window,
+            "model": model,
+            "data": data,
+            "renderer": renderer,
+            "camera": camera,
+            "metrics": row[policy],
+        })
 
-    max_t = max(float(data[1][-1]) for data in policy_data if data[1].size)
-    frame_times = np.linspace(0.0, max_t, min(240, max(2, int(max_t * 10))))
+    motion_duration = policy_motion_duration("sonic", motion)
+    pre_roll = max(
+        side["window"]["playback_sim_time_s"] - side["window"]["release_sim_time_s"] + 0.50
+        for side in sides
+    )
+    pre_roll = max(pre_roll, 1.0)
+    max_available_pre = min(
+        side["window"]["playback_sim_time_s"] - float(side["replay"]["sim_time_s"][0])
+        for side in sides
+    )
+    if max_available_pre + 1e-6 < pre_roll:
+        raise ValueError(
+            f"{motion}: replay logs start too late for support-release preroll "
+            f"(need {pre_roll:.3f}s, have {max_available_pre:.3f}s)"
+        )
+
+    fps = 20
+    frame_times = np.arange(-pre_roll, motion_duration + 1e-9, 1.0 / fps)
     out = artifacts / f"{motion}_comparison.mp4"
-    with imageio.get_writer(out, fps=10, codec="libx264", quality=7) as writer:
-        for now in frame_times:
-            fig, axes = plt.subplots(1, 2, figsize=(12, 5.12), dpi=100, sharey=True)
-            for ax, (policy, t, q, ref_q) in zip(axes, policy_data):
-                end = max(1, int(np.searchsorted(t, now)))
-                for joint in range(q.shape[1]):
-                    ax.plot(t[:end], ref_q[:end, joint], "--", linewidth=1.0, alpha=0.45)
-                    ax.plot(t[:end], q[:end, joint], linewidth=1.2, alpha=0.85)
-                item = row[policy]
-                rmse = item.get("mean_joint_rmse_rad", float("nan"))
-                delay = item.get("tracking_delay_s", float("nan"))
-                release = "release pass" if item.get("passed_release_gate") else "release missing/fail"
-                ax.set_title(f"{policy}  RMSE {rmse:.3f}  delay {delay:.3f}s\n{release}")
-                ax.set_xlabel("phase time (s)")
-                ax.set_xlim(0, max_t)
-                ax.set_ylim(-3.2, 3.2)
-                ax.grid(True, alpha=0.25)
-            axes[0].set_ylabel("joint angle rad, first 6 DOF")
-            fig.suptitle(f"{motion}  tracked vs reference ghost overlay")
-            fig.tight_layout()
-            fig.canvas.draw()
-            rgba = np.asarray(fig.canvas.buffer_rgba())
-            writer.append_data(rgba[:, :, :3])
-            plt.close(fig)
+    with imageio.get_writer(out, fps=fps, codec="libx264", quality=8, macro_block_size=16) as writer:
+        for phase_t in frame_times:
+            rendered = []
+            for side in sides:
+                replay = side["replay"]
+                sim_time = side["window"]["playback_sim_time_s"] + float(phase_t)
+                idx = nearest_replay_index(replay, sim_time)
+                image = render_replay_image(
+                    mujoco,
+                    side["model"],
+                    side["data"],
+                    side["renderer"],
+                    side["camera"],
+                    replay["qpos"][idx],
+                )
+                metrics = side["metrics"]
+                release_phase = side["window"]["release_sim_time_s"] - side["window"]["playback_sim_time_s"]
+                support = "support" if int(replay["support_active"][idx]) else "released"
+                event = "pre-motion"
+                if abs(phase_t) <= 0.05:
+                    event = "ACTING START"
+                elif phase_t >= motion_duration - 0.05:
+                    event = "ACTING END"
+                elif abs(phase_t - release_phase) <= 0.05:
+                    event = "SUPPORT RELEASE"
+                lines = [
+                    f"{side['policy']} | {motion}",
+                    (
+                        f"phase={phase_t:+.2f}s sim={replay['sim_time_s'][idx]:.2f}s "
+                        f"{support} {event}"
+                    ),
+                    (
+                        f"RMSE={metrics.get('mean_joint_rmse_rad', float('nan')):.3f} "
+                        f"delay={metrics.get('tracking_delay_s', float('nan')):.3f}s "
+                        f"release={release_phase:+.2f}s"
+                    ),
+                ]
+                rendered.append(overlay_text(image, lines))
+            writer.append_data(np.concatenate(rendered, axis=1))
+    for side in sides:
+        side["renderer"].close()
+    validate_video_file(out)
     return out
 
 
@@ -1190,6 +1529,17 @@ def wait_for_support_state(run_dir: Path, support_active: int, timeout_s: float)
     raise TimeoutError(f"timed out waiting for simulator support_active={expected}")
 
 
+def wait_for_cmd_active_state(run_dir: Path, cmd_active: int, timeout_s: float) -> dict[str, str]:
+    deadline = time.monotonic() + timeout_s
+    expected = str(int(cmd_active))
+    while time.monotonic() < deadline:
+        row = latest_sim_status(run_dir)
+        if row and row.get("cmd_active") == expected:
+            return row
+        time.sleep(0.05)
+    raise TimeoutError(f"timed out waiting for simulator cmd_active={expected}")
+
+
 def wait_for_pre_release_hold(
     run_dir: Path,
     event_log: SequenceEventLog,
@@ -1354,6 +1704,16 @@ def wait_for_motion_window(sim: ManagedProcess, duration_s: float, event_log: Se
         time.sleep(min(0.10, max(0.0, deadline - time.monotonic())))
 
 
+def wait_for_sim_window(sim: ManagedProcess, duration_s: float) -> int | None:
+    deadline = time.monotonic() + duration_s
+    while time.monotonic() < deadline:
+        code = sim.poll()
+        if code is not None:
+            return code
+        time.sleep(min(0.10, max(0.0, deadline - time.monotonic())))
+    return sim.poll()
+
+
 def policy_motion_duration(policy: str, motion: str) -> float:
     del policy
     path = ROOT / "assets" / "motions" / "sonic_motions" / motion / "joint_pos.csv"
@@ -1509,9 +1869,9 @@ def simulator_reference_args(policy: str, motion: str) -> list[str]:
     return []
 
 
-def simulator_scene_args(policy: str) -> list[str]:
+def policy_scene_path(policy: str) -> Path:
     if policy == "sonic":
-        scene = (
+        return (
             ROOT
             / "thirdparties"
             / "GR00T-WholeBodyControl"
@@ -1522,8 +1882,11 @@ def simulator_scene_args(policy: str) -> list[str]:
             / "g1"
             / "scene_43dof.xml"
         )
-    else:
-        scene = ROOT / "thirdparties" / "HoloMotion" / "assets" / "robots" / "unitree" / "G1" / "29dof" / "scene_29dof.xml"
+    return ROOT / "thirdparties" / "HoloMotion" / "assets" / "robots" / "unitree" / "G1" / "29dof" / "scene_29dof.xml"
+
+
+def simulator_scene_args(policy: str) -> list[str]:
+    scene = policy_scene_path(policy)
     return ["--scene", f"/workspace/wbc/{scene.relative_to(ROOT)}"]
 
 
@@ -1757,6 +2120,180 @@ def run_holomotion_sequence(
         bridge.terminate()
         docker_rm_force(name)
         docker_rm_force(bridge_name)
+
+
+def clean_run_dir(run_dir: Path) -> None:
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+
+def run_release_no_control_case(args: argparse.Namespace, root: Path) -> None:
+    run_dir = root / "no_control_direct_release"
+    clean_run_dir(run_dir)
+    control_file = run_dir / "sim_control.json"
+    event_log = SequenceEventLog(run_dir / "sequence_events.csv")
+    sim_name = f"wbc-sim-release-no-control-{int(time.time())}"
+    sim = start_simulator(
+        run_dir,
+        control_file,
+        4.0,
+        sim_name,
+        "holomotion",
+        MOTIONS[0],
+        args.support_height,
+    )
+    try:
+        event_log.append(
+            "release_validation_case_start",
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=1,
+            detail="no-control direct release must fall within 2s",
+        )
+        release_support(run_dir, control_file, event_log, "direct release with no active controller")
+        wait_for_sim_window(sim, 2.5)
+        event_log.append(
+            "release_validation_case_end",
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=(latest_sim_status(run_dir) or {}).get("support_active", ""),
+            detail="no-control direct release window complete",
+        )
+    finally:
+        update_control_file(control_file, stop=True)
+        sim.terminate()
+        docker_rm_force(sim_name)
+
+
+def run_release_sonic_control_case(args: argparse.Namespace, root: Path) -> None:
+    motion = args.motion or MOTIONS[0]
+    run_dir = root / "sonic_control_release_stop"
+    clean_run_dir(run_dir)
+    control_file = run_dir / "sim_control.json"
+    event_log = SequenceEventLog(run_dir / "sequence_events.csv")
+    ensure_sonic_built()
+    sim_name = f"wbc-sim-release-sonic-{int(time.time())}"
+    sim = start_simulator(
+        run_dir,
+        control_file,
+        args.policy_ready_timeout_s + 12.0,
+        sim_name,
+        "sonic",
+        motion,
+        args.support_height,
+    )
+    policy_name = f"wbc-sonic-release-{int(time.time())}"
+    policy = None
+    try:
+        motion_root = copy_sonic_single_motion(run_dir, motion)
+        stock_csv_dir = run_dir / "csv"
+        script = (
+            "cd /workspace/wbc/thirdparties/GR00T-WholeBodyControl/gear_sonic_deploy && "
+            "source /opt/ros/humble/setup.bash && "
+            "source scripts/setup_env.sh && "
+            "./target/release/g1_deploy_onnx_ref "
+            "lo "
+            "policy/release/model_decoder.onnx "
+            f"/workspace/wbc/{motion_root.relative_to(ROOT)} "
+            "--obs-config policy/release/observation_config.yaml "
+            "--encoder-file policy/release/model_encoder.onnx "
+            "--input-type keyboard "
+            "--output-type zmq "
+            "--zmq-host localhost "
+            "--zmq-out-port 15557 "
+            "--disable-crc-check "
+            "--enable-csv-logs "
+            f"--logs-dir /workspace/wbc/{stock_csv_dir.relative_to(ROOT)}"
+        )
+        policy = ManagedProcess(
+            docker_base_args(policy_name, SONIC_IMAGE, tty=True) + ["bash", "-lc", script],
+            run_dir / "sonic_stdout.log",
+            use_pty=True,
+        )
+        policy.start()
+        wait_for_log_marker(policy, policy.log_path, "Init Done", args.policy_ready_timeout_s)
+        policy.send("]")
+        marker = wait_for_log_marker(
+            policy,
+            policy.log_path,
+            "[Control] DEBUG: operator_state.start=true, transitioning to CONTROL state",
+            args.policy_ready_timeout_s,
+        )
+        event_log.append(
+            CONTROL_EVENT,
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=1,
+            detail=marker,
+        )
+        release_support(run_dir, control_file, event_log, "release simulator support after SONIC CONTROL")
+        code = wait_for_sim_window(sim, 5.25)
+        if code is not None:
+            event_log.append(
+                "simulator_ended_before_stable_control_window",
+                sim_time_s=latest_sim_time(run_dir),
+                support_active=0,
+                detail=f"simulator exited with code {code}",
+            )
+            return
+        event_log.append(
+            "stable_released_control_elapsed",
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=0,
+            detail="released CONTROL remained standing for more than 5s",
+        )
+        policy.terminate(timeout=2.0)
+        docker_rm_force(policy_name)
+        policy = None
+        stopped = wait_for_cmd_active_state(run_dir, 0, 2.0)
+        event_log.append(
+            "control_stopped",
+            sim_time_s=float(stopped["sim_time_s"]),
+            support_active=0,
+            detail="stock SONIC policy process terminated; simulator continues with cmd timeout",
+        )
+        wait_for_sim_window(sim, 2.5)
+        event_log.append(
+            "post_control_stop_window_elapsed",
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=0,
+            detail="control-stop fall window complete",
+        )
+    finally:
+        update_control_file(control_file, stop=True)
+        if policy is not None:
+            policy.terminate()
+        sim.terminate()
+        docker_rm_force(policy_name)
+        docker_rm_force(sim_name)
+
+
+def run_release_validation(args: argparse.Namespace) -> int:
+    cleanup_stale_benchmark_containers()
+    logs_root = Path(args.logs)
+    if not logs_root.is_absolute():
+        logs_root = ROOT / logs_root
+    root = logs_root / "release_validation"
+    if not getattr(args, "skip_gpu_preflight", False):
+        probe = probe_gpu_runtime()
+        if not probe["ok"]:
+            payload = write_global_impossibility(logs_root, probe)
+            print(json.dumps({"ok": True, "documented_impossibility": payload}, indent=2))
+            return 0
+    execution_failures = []
+    try:
+        run_release_no_control_case(args, root)
+    except Exception as exc:
+        execution_failures.append(f"no_control_direct_release execution failed: {exc}")
+    try:
+        run_release_sonic_control_case(args, root)
+    except Exception as exc:
+        execution_failures.append(f"sonic_control_release_stop execution failed: {exc}")
+    proof = validate_release_validation_logs(logs_root)
+    if execution_failures:
+        proof["passed"] = False
+        proof["failures"].extend(execution_failures)
+        (root / "execution_failures.json").write_text(json.dumps(execution_failures, indent=2) + "\n")
+    print(json.dumps({"ok": proof["passed"], "proof": proof}, indent=2))
+    return 0 if proof["passed"] else 1
 
 
 def run_motion(args: argparse.Namespace) -> int:
@@ -2042,6 +2579,7 @@ def smoke_sim_bridge(_: argparse.Namespace) -> int:
         "--log-hz 50 "
         "--out-dir /tmp/wbc-sim-bridge && "
         "test -s /tmp/wbc-sim-bridge/lowcmd.csv && "
+        "test -s /tmp/wbc-sim-bridge/replay.csv && "
         "test -s /tmp/wbc-sim-bridge/simulator_status.csv && "
         "python3 - <<'PY'\n"
         "import csv\n"
@@ -2053,6 +2591,10 @@ def smoke_sim_bridge(_: argparse.Namespace) -> int:
         "lowcmd = list(csv.DictReader((root / 'lowcmd.csv').open()))\n"
         "assert len(lowcmd) >= 5, len(lowcmd)\n"
         "assert 'measured_q_28' in lowcmd[0]\n"
+        "replay = list(csv.DictReader((root / 'replay.csv').open()))\n"
+        "assert len(replay) >= 5, len(replay)\n"
+        "assert 'qpos_0' in replay[0] and 'qpos_6' in replay[0]\n"
+        "assert 'measured_q_28' in replay[0]\n"
         "PY"
     )
     cmd = [
@@ -2165,6 +2707,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     sub.add_parser("smoke-sim-release").set_defaults(func=smoke_sim_release)
     sub.add_parser("smoke-holomotion").set_defaults(func=smoke_holomotion)
     sub.add_parser("smoke-sonic-build").set_defaults(func=smoke_sonic_build)
+    p = sub.add_parser("run-release-validation")
+    p.add_argument("--logs", default=str(ROOT / "logs"))
+    p.add_argument("--policy-ready-timeout-s", type=float, default=120.0)
+    p.add_argument("--support-height", type=float, default=0.75)
+    p.add_argument("--motion", choices=MOTIONS, default=MOTIONS[0])
+    p.add_argument("--skip-gpu-preflight", action="store_true")
+    p.set_defaults(func=run_release_validation)
     p = sub.add_parser("report")
     p.add_argument("--logs", default=str(ROOT / "logs"))
     p.add_argument("--artifacts", default=str(ROOT / "artifacts"))

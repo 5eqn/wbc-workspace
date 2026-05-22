@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 usage() {
-  echo "Usage: $0 [build|validate-assets|prepare-assets|validate-deploy|validate-images|run-motion|run-all-motions|smoke-release-gate|smoke-sim-bridge|smoke-sim-release|smoke-holomotion|smoke-sonic-build|all]"
+  echo "Usage: $0 [build|validate-assets|prepare-assets|validate-deploy|validate-images|run-motion|run-all-motions|run-release-validation|smoke-release-gate|smoke-sim-bridge|smoke-sim-release|smoke-holomotion|smoke-sonic-build|all]"
 }
 
 cmd="${1:-all}"
@@ -36,6 +36,9 @@ case "$cmd" in
   run-all-motions)
     "$PYTHON_BIN" "$ROOT_DIR/scripts/benchmark.py" run-all-motions "${@:2}"
     ;;
+  run-release-validation)
+    "$PYTHON_BIN" "$ROOT_DIR/scripts/benchmark.py" run-release-validation "${@:2}"
+    ;;
   smoke-release-gate)
     "$PYTHON_BIN" "$ROOT_DIR/scripts/benchmark.py" smoke-release-gate
     ;;
@@ -62,6 +65,7 @@ case "$cmd" in
     "$0" smoke-sim-release
     "$0" smoke-sonic-build
     "$0" smoke-holomotion
+    "$0" run-release-validation
     "$0" run-all-motions
     ;;
   -h|--help|help)
