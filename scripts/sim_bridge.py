@@ -259,7 +259,13 @@ def apply_initial_reference(
         loaded = np.load(reference, allow_pickle=False)
         joint_hw = np.asarray(loaded["ref_dof_pos"], dtype=np.float64)[frame, :29].tolist()
         root_pos = first_body_frame(loaded["ref_global_translation"], frame, 3).tolist()
-        root_quat = first_body_frame(loaded["ref_global_rotation_quat"], frame, 4).tolist()
+        root_quat_xyzw = first_body_frame(loaded["ref_global_rotation_quat"], frame, 4)
+        root_quat = [
+            float(root_quat_xyzw[3]),
+            float(root_quat_xyzw[0]),
+            float(root_quat_xyzw[1]),
+            float(root_quat_xyzw[2]),
+        ]
     else:
         raise ValueError(f"unsupported reference format: {ref_format}")
 
