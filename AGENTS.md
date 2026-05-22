@@ -99,6 +99,7 @@ These are operational hints, not substitutes for the hard gates. Add new hints h
 9. Stop a test early when the robot has clearly fallen. A fallen run should be marked failed immediately rather than allowed to continue and contaminate timing or metrics.
 10. HoloMotion v1.3 stock deploy still failed `dance_chicken_c03_neutral2s` after initializing the simulator from that HoloMotion NPZ frame 0; the run reached valid release order, then fell during motion tracking with RMSE around `0.421`. Root initialization alone is not the missing contract.
 11. HoloMotion v1.3 stock deploy with simulator `--publish-every 4` missed the current one-shot D-pad clip-selection pulse and timed out before release. Keep HoloMotion at the current higher low-state publish cadence unless the selection transport is changed deliberately.
+12. Official HoloMotion v1.3 MuJoCo sim2sim diagnostics also fail the two remaining Holo clips using the provided `HoloMotion_motion_tracking_model`: `dance_chicken_c03_neutral2s` has joint RMSE about `0.513` and base height drops below `0.25m` at about `4.26s`; `dance_heart111_c01_neutral2s` has joint RMSE about `0.436` and drops below `0.25m` at about `0.98s`. This is evidence that those two failures are not explained solely by the benchmark's stock-deploy-to-`unitree_mujoco` bridge.
 
 ## Hints (not requirements)
 
