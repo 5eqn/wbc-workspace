@@ -136,6 +136,7 @@ SONIC_BODY_PART_INDEXES = [0, 4, 10, 18, 5, 11, 19, 9, 16, 22, 28, 17, 23, 29]
 SONIC_POST_RELEASE_WAIT_BY_MOTION = {
     "dance_phony_c01_neutral2s": 0.5,
 }
+HOLOMOTION_POST_RELEASE_VELOCITY_HOLD_S = 5.0
 
 
 class SequenceEventLog:
@@ -1687,6 +1688,13 @@ def run_holomotion_sequence(args: argparse.Namespace, run_dir: Path, control_fil
 
         wait_for_pre_release_hold(run_dir, event_log)
         release_support(run_dir, control_file, event_log, "release simulator support after HoloMotion CONTROL")
+        time.sleep(HOLOMOTION_POST_RELEASE_VELOCITY_HOLD_S)
+        event_log.append(
+            "post_release_velocity_hold_elapsed",
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=0,
+            detail=f"seconds={HOLOMOTION_POST_RELEASE_VELOCITY_HOLD_S:.3f}",
+        )
         event_log.append(
             "sent_key_B",
             sim_time_s=latest_sim_time(run_dir),
