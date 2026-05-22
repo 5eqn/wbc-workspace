@@ -60,7 +60,17 @@ EVENT_LOG_FIELDS = [
 HOLOMOTION_MIN_TAG = "v1.3.0"
 SONIC_DEPLOY = ROOT / "thirdparties" / "GR00T-WholeBodyControl" / "gear_sonic_deploy"
 HOLO_DEPLOY = ROOT / "thirdparties" / "HoloMotion" / "deployment" / "unitree_g1_ros2_29dof"
-COMMON_SIM_SCENE = ROOT / "thirdparties" / "unitree_mujoco" / "unitree_robots" / "g1" / "scene_29dof.xml"
+COMMON_SIM_SCENE = (
+    ROOT
+    / "thirdparties"
+    / "GR00T-WholeBodyControl"
+    / "decoupled_wbc"
+    / "control"
+    / "robot_model"
+    / "model_data"
+    / "g1"
+    / "scene_29dof.xml"
+)
 SIM_IMAGE = "wbc-unitree_mujoco"
 SONIC_IMAGE = "wbc-gear-sonic"
 HOLO_IMAGE = "wbc-holomotion"
@@ -850,6 +860,116 @@ def write_release_validation_artifact(logs: Path, artifacts: Path) -> tuple[dict
     return proof, list(proof["failures"])
 
 
+def validate_scene_contract(scene: Path) -> dict:
+    import mujoco
+
+    model = mujoco.MjModel.from_xml_path(str(scene))
+    missing = []
+    joint_qpos_addresses = []
+    actuator_ids = []
+    for joint_name in BODY_JOINT_NAMES:
+        joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+        actuator_id = mujoco.mj_name2id(
+            model,
+            mujoco.mjtObj.mjOBJ_ACTUATOR,
+            joint_name.removesuffix("_joint"),
+        )
+        if joint_id < 0 or actuator_id < 0:
+            missing.append({"joint": joint_name, "joint_id": joint_id, "actuator_id": actuator_id})
+            continue
+        joint_qpos_addresses.append(int(model.jnt_qposadr[joint_id]))
+        actuator_ids.append(int(actuator_id))
+    scene_text = str(scene)
+    failures = []
+    if model.nq != 36 or model.nv != 35 or model.nu != 29:
+        failures.append(f"scene has nq={model.nq}, nv={model.nv}, nu={model.nu}; expected 36/35/29")
+    if missing:
+        failures.append(f"scene is missing {len(missing)} expected 29DOF joints/actuators")
+    if "43dof" in scene_text.lower() or "with_hand" in scene_text.lower():
+        failures.append(f"scene path is not a pure 29DOF active benchmark plant: {scene}")
+    return {
+        "scene": str(scene),
+        "nq": int(model.nq),
+        "nv": int(model.nv),
+        "nu": int(model.nu),
+        "nbody": int(model.nbody),
+        "ngeom": int(model.ngeom),
+        "body_mass_kg": float(sum(model.body_mass)),
+        "body_joint_names": BODY_JOINT_NAMES,
+        "body_qpos_addresses": joint_qpos_addresses,
+        "body_actuator_ids": actuator_ids,
+        "missing": missing,
+        "passed": not failures,
+        "failures": failures,
+    }
+
+
+def validate_single_robot_interface(logs: Path, artifacts: Path) -> tuple[dict, list[str]]:
+    failures = []
+    run_scenes: dict[str, str] = {}
+    run_joint_names: dict[str, list[str]] = {}
+    run_qpos_addresses: dict[str, list[int]] = {}
+    run_dirs = [expected_run_dir(logs, policy, motion) for motion in MOTIONS for policy in POLICIES]
+    run_dirs.extend([
+        logs / "release_validation" / "no_control_direct_release",
+        logs / "release_validation" / "sonic_control_release_stop",
+    ])
+    for run_dir in run_dirs:
+        summary_path = run_dir / "sim_bridge_summary.json"
+        tag = str(run_dir.relative_to(logs)) if run_dir.is_relative_to(logs) else str(run_dir)
+        if not summary_path.exists():
+            failures.append(f"{tag}: missing sim_bridge_summary.json")
+            continue
+        summary = json.loads(summary_path.read_text())
+        scene = str(summary.get("scene", ""))
+        run_scenes[tag] = scene
+        joint_names = summary.get("body_joint_names")
+        qpos_addresses = summary.get("body_qpos_addresses")
+        run_joint_names[tag] = joint_names if isinstance(joint_names, list) else []
+        run_qpos_addresses[tag] = qpos_addresses if isinstance(qpos_addresses, list) else []
+        if joint_names != BODY_JOINT_NAMES:
+            failures.append(f"{tag}: simulator joint order metadata does not match Unitree G1 29DOF body order")
+        if not isinstance(qpos_addresses, list) or len(qpos_addresses) != 29:
+            failures.append(f"{tag}: simulator did not log 29 body qpos addresses")
+
+        lowcmd_path = run_dir / "lowcmd.csv"
+        if lowcmd_path.exists():
+            header = lowcmd_path.read_text(errors="replace").splitlines()[0].split(",")
+            if "cmd_q_28" not in header or "cmd_q_29" in header:
+                failures.append(f"{tag}: low-level command log is not exactly 29 commanded body joints")
+
+    unique_scenes = sorted(set(run_scenes.values()))
+    if len(unique_scenes) != 1:
+        failures.append(f"policy/release runs used multiple simulator scenes: {unique_scenes}")
+
+    scene_contract = None
+    if unique_scenes:
+        try:
+            scene_contract = validate_scene_contract(logged_scene_path({"summary": {"scene": unique_scenes[0]}}))
+            failures.extend(scene_contract["failures"])
+        except Exception as exc:
+            failures.append(f"single 29DOF scene contract unavailable: {exc}")
+
+    proof = {
+        "passed": not failures,
+        "expected_active_scene": str(COMMON_SIM_SCENE),
+        "unique_logged_scenes": unique_scenes,
+        "scene_contract": scene_contract,
+        "run_scenes": run_scenes,
+        "run_joint_names": run_joint_names,
+        "run_qpos_addresses": run_qpos_addresses,
+        "real_robot_swap_claim": (
+            "Policies communicate through the same Unitree G1 29DOF low-level state/command "
+            "surface; replacing the simulator with a real 29DOF endpoint must not change "
+            "policy deploy code, joint order, or orchestration other than disabling "
+            "simulator-only support/release controls."
+        ),
+        "failures": failures,
+    }
+    (artifacts / "single_robot_interface.json").write_text(json.dumps(proof, indent=2) + "\n")
+    return proof, failures
+
+
 def report(args: argparse.Namespace) -> int:
     logs = Path(args.logs)
     artifacts = Path(args.artifacts)
@@ -921,7 +1041,11 @@ def report(args: argparse.Namespace) -> int:
     write_metric_csvs(artifacts, summary)
     _, release_failures = write_release_validation_artifact(logs, artifacts)
     failures.extend(release_failures)
+    single_robot, single_robot_failures = validate_single_robot_interface(logs, artifacts)
+    failures.extend(single_robot_failures)
+    summary["single_robot_interface_passed"] = single_robot["passed"]
     failures.extend(make_all_comparison_videos(logs, artifacts, rows))
+    summary["failures"] = failures
     (artifacts / "metrics_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     write_markdown(artifacts / "report.md", summary)
     return 0 if not failures else 1
@@ -1198,6 +1322,7 @@ def write_markdown(path: Path, summary: dict) -> None:
         "",
         f"All RMSE gates passed: `{summary['all_rmse_passed']}`",
         f"All release-order gates passed: `{summary['all_release_gates_passed']}`",
+        f"Single 29DOF robot interface passed: `{summary.get('single_robot_interface_passed', False)}`",
         "",
     ])
     if summary["failures"]:
@@ -1859,14 +1984,7 @@ def holomotion_clip_index(motion: str) -> int:
 
 
 def simulator_reference_args(policy: str, motion: str) -> list[str]:
-    if policy == "sonic":
-        reference = ROOT / "assets" / "motions" / "sonic_motions" / motion
-        return [
-            "--init-reference",
-            f"/workspace/wbc/{reference.relative_to(ROOT)}",
-            "--init-reference-format",
-            "sonic_csv",
-        ]
+    del policy, motion
     return []
 
 

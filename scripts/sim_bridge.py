@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 from pathlib import Path
 import struct
 import sys
@@ -20,6 +19,8 @@ from typing import Any
 
 
 DEFAULT_SIM_ROOT = Path("/workspace/unitree_mujoco")
+HOLD_KP = 120.0
+HOLD_KD = 6.0
 BODY_JOINT_NAMES = [
     "left_hip_pitch_joint",
     "left_hip_roll_joint",
@@ -51,7 +52,7 @@ BODY_JOINT_NAMES = [
     "right_wrist_pitch_joint",
     "right_wrist_yaw_joint",
 ]
-DEFAULT_ANGLES = [
+NEUTRAL_JOINT_Q = [
     -0.312,
     0.0,
     0.0,
@@ -82,153 +83,6 @@ DEFAULT_ANGLES = [
     0.0,
     0.0,
 ]
-ARMATURE_5020 = 0.003609725
-ARMATURE_7520_14 = 0.010177520
-ARMATURE_7520_22 = 0.025101925
-ARMATURE_4010 = 0.00425
-NATURAL_FREQ = 10.0 * 2.0 * math.pi
-DAMPING_RATIO = 2.0
-STIFFNESS_5020 = ARMATURE_5020 * NATURAL_FREQ * NATURAL_FREQ
-STIFFNESS_7520_14 = ARMATURE_7520_14 * NATURAL_FREQ * NATURAL_FREQ
-STIFFNESS_7520_22 = ARMATURE_7520_22 * NATURAL_FREQ * NATURAL_FREQ
-STIFFNESS_4010 = ARMATURE_4010 * NATURAL_FREQ * NATURAL_FREQ
-DAMPING_5020 = 2.0 * DAMPING_RATIO * ARMATURE_5020 * NATURAL_FREQ
-DAMPING_7520_14 = 2.0 * DAMPING_RATIO * ARMATURE_7520_14 * NATURAL_FREQ
-DAMPING_7520_22 = 2.0 * DAMPING_RATIO * ARMATURE_7520_22 * NATURAL_FREQ
-DAMPING_4010 = 2.0 * DAMPING_RATIO * ARMATURE_4010 * NATURAL_FREQ
-HOLD_KP = [
-    STIFFNESS_7520_22,
-    STIFFNESS_7520_22,
-    STIFFNESS_7520_14,
-    STIFFNESS_7520_22,
-    2.0 * STIFFNESS_5020,
-    2.0 * STIFFNESS_5020,
-    STIFFNESS_7520_22,
-    STIFFNESS_7520_22,
-    STIFFNESS_7520_14,
-    STIFFNESS_7520_22,
-    2.0 * STIFFNESS_5020,
-    2.0 * STIFFNESS_5020,
-    STIFFNESS_7520_14,
-    2.0 * STIFFNESS_5020,
-    2.0 * STIFFNESS_5020,
-    STIFFNESS_5020,
-    STIFFNESS_5020,
-    STIFFNESS_5020,
-    STIFFNESS_5020,
-    STIFFNESS_5020,
-    STIFFNESS_4010,
-    STIFFNESS_4010,
-    STIFFNESS_5020,
-    STIFFNESS_5020,
-    STIFFNESS_5020,
-    STIFFNESS_5020,
-    STIFFNESS_5020,
-    STIFFNESS_4010,
-    STIFFNESS_4010,
-]
-HOLD_KD = [
-    DAMPING_7520_22,
-    DAMPING_7520_22,
-    DAMPING_7520_14,
-    DAMPING_7520_22,
-    2.0 * DAMPING_5020,
-    2.0 * DAMPING_5020,
-    DAMPING_7520_22,
-    DAMPING_7520_22,
-    DAMPING_7520_14,
-    DAMPING_7520_22,
-    2.0 * DAMPING_5020,
-    2.0 * DAMPING_5020,
-    DAMPING_7520_14,
-    2.0 * DAMPING_5020,
-    2.0 * DAMPING_5020,
-    DAMPING_5020,
-    DAMPING_5020,
-    DAMPING_5020,
-    DAMPING_5020,
-    DAMPING_5020,
-    DAMPING_4010,
-    DAMPING_4010,
-    DAMPING_5020,
-    DAMPING_5020,
-    DAMPING_5020,
-    DAMPING_5020,
-    DAMPING_5020,
-    DAMPING_4010,
-    DAMPING_4010,
-]
-HARDWARE_FROM_SONIC_POLICY = [
-    0,
-    3,
-    6,
-    9,
-    13,
-    17,
-    1,
-    4,
-    7,
-    10,
-    14,
-    18,
-    2,
-    5,
-    8,
-    11,
-    15,
-    19,
-    21,
-    23,
-    25,
-    27,
-    12,
-    16,
-    20,
-    22,
-    24,
-    26,
-    28,
-]
-
-
-def read_csv_frame(path: Path, frame: int, width: int) -> list[float]:
-    with path.open(newline="") as f:
-        reader = csv.reader(f)
-        next(reader, None)
-        for row_idx, row in enumerate(reader):
-            if row_idx != frame:
-                continue
-            values = [float(value) for value in row if value != ""]
-            if len(values) < width:
-                raise ValueError(f"{path} frame {frame} has {len(values)} values, expected {width}")
-            return values[:width]
-    raise ValueError(f"{path} does not contain frame {frame}")
-
-
-def first_body_frame(array: Any, frame: int, width: int):
-    import numpy as np
-
-    values = np.asarray(array, dtype=np.float64)
-    if values.ndim == 3:
-        values = values[frame, 0, :]
-    elif values.ndim == 2:
-        values = values[frame, :]
-    else:
-        values = values.reshape(values.shape[0], -1)[frame, :]
-    if values.size < width:
-        raise ValueError(f"reference array has {values.size} values, expected {width}")
-    return values[:width]
-
-
-def snap_root_to_ground(model: Any, data: Any, mujoco: Any, ground_clearance: float) -> None:
-    robot_geom_z = [
-        float(data.geom_xpos[i, 2])
-        for i in range(model.ngeom)
-        if mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i) != "floor"
-    ]
-    if robot_geom_z:
-        data.qpos[2] -= min(robot_geom_z) - ground_clearance
-        mujoco.mj_forward(model, data)
 
 
 def set_named_joint_qpos(model: Any, data: Any, mujoco: Any, q: list[float]) -> None:
@@ -237,50 +91,6 @@ def set_named_joint_qpos(model: Any, data: Any, mujoco: Any, q: list[float]) -> 
         if joint_id < 0:
             raise ValueError(f"Missing joint in model: {joint_name}")
         data.qpos[int(model.jnt_qposadr[joint_id])] = float(q[i])
-
-
-def apply_initial_reference(
-    model: Any,
-    data: Any,
-    mujoco: Any,
-    reference: Path,
-    ref_format: str,
-    frame: int,
-    ground_clearance: float,
-) -> dict[str, Any]:
-    import numpy as np
-
-    if ref_format == "sonic_csv":
-        joint_policy = read_csv_frame(reference / "joint_pos.csv", frame, 29)
-        joint_hw = [joint_policy[i] for i in HARDWARE_FROM_SONIC_POLICY]
-        root_pos = read_csv_frame(reference / "body_pos.csv", frame, 42)[:3]
-        root_quat = read_csv_frame(reference / "body_quat.csv", frame, 56)[:4]
-    elif ref_format == "holomotion_npz":
-        loaded = np.load(reference, allow_pickle=False)
-        joint_hw = np.asarray(loaded["ref_dof_pos"], dtype=np.float64)[frame, :29].tolist()
-        root_pos = first_body_frame(loaded["ref_global_translation"], frame, 3).tolist()
-        root_quat_xyzw = first_body_frame(loaded["ref_global_rotation_quat"], frame, 4)
-        root_quat = [
-            float(root_quat_xyzw[3]),
-            float(root_quat_xyzw[0]),
-            float(root_quat_xyzw[1]),
-            float(root_quat_xyzw[2]),
-        ]
-    else:
-        raise ValueError(f"unsupported reference format: {ref_format}")
-
-    data.qpos[0:3] = root_pos
-    data.qpos[3:7] = root_quat
-    set_named_joint_qpos(model, data, mujoco, joint_hw)
-    data.qvel[:] = 0.0
-    mujoco.mj_forward(model, data)
-    snap_root_to_ground(model, data, mujoco, ground_clearance)
-    return {
-        "reference": str(reference),
-        "reference_format": ref_format,
-        "reference_frame": frame,
-        "root_z": float(data.qpos[2]),
-    }
 
 
 def load_upstream_bridge(sim_root: Path, robot: str):
@@ -428,7 +238,7 @@ class UnitreeG1Bridge:
                 )
         elif precontrol_hold:
             for i in range(self.num_motor):
-                self.data.ctrl[self.body_actuator_ids[i]] = HOLD_KP[i] * (DEFAULT_ANGLES[i] - q[i]) - HOLD_KD[i] * dq[i]
+                self.data.ctrl[self.body_actuator_ids[i]] = HOLD_KP * (NEUTRAL_JOINT_Q[i] - q[i]) - HOLD_KD * dq[i]
         return cmd_active
 
     def publish(self) -> None:
@@ -585,10 +395,6 @@ def main() -> int:
     parser.add_argument("--control-file", default="")
     parser.add_argument("--support-active", type=int, default=1)
     parser.add_argument("--support-height", type=float, default=0.75)
-    parser.add_argument("--init-reference", default="")
-    parser.add_argument("--init-reference-format", choices=["sonic_csv", "holomotion_npz"], default="sonic_csv")
-    parser.add_argument("--init-reference-frame", type=int, default=0)
-    parser.add_argument("--ground-clearance", type=float, default=0.001)
     parser.add_argument("--fall-stop-base-z", type=float, default=0.25)
     parser.add_argument("--fall-stop-hold-s", type=float, default=0.20)
     parser.add_argument("--cmd-timeout-s", type=float, default=0.25)
@@ -620,25 +426,8 @@ def main() -> int:
     data = mujoco.MjData(model)
     data.qpos[0:3] = [0.0, 0.0, float(args.support_height)]
     data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
-    set_named_joint_qpos(model, data, mujoco, DEFAULT_ANGLES)
+    set_named_joint_qpos(model, data, mujoco, NEUTRAL_JOINT_Q)
     mujoco.mj_forward(model, data)
-    init_summary = None
-    if args.init_reference:
-        init_summary = apply_initial_reference(
-            model,
-            data,
-            mujoco,
-            Path(args.init_reference),
-            args.init_reference_format,
-            args.init_reference_frame,
-            args.ground_clearance,
-        )
-        print(
-            "[sim_bridge] initialized support pose from "
-            f"{init_summary['reference']} frame={args.init_reference_frame} "
-            f"root_z={init_summary['root_z']:.3f}",
-            flush=True,
-        )
     bridge = UnitreeG1Bridge(model, data, mujoco, sdk)
     support_root_qpos = data.qpos[:7].copy()
     support_root_qvel = data.qvel[:6].copy()
@@ -836,7 +625,9 @@ def main() -> int:
             "log_hz": args.log_hz,
             "publish_every": args.publish_every,
             "support_height": args.support_height,
-            "init_reference": init_summary,
+            "neutral_joint_q": NEUTRAL_JOINT_Q,
+            "hold_kp": HOLD_KP,
+            "hold_kd": HOLD_KD,
             "fall_stop": fall_stop,
             "control_file": str(control_path),
             "cmd_timeout_s": args.cmd_timeout_s,
