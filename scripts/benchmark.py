@@ -1013,6 +1013,28 @@ def docker_rm_force(name: str) -> None:
     subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
 
+def cleanup_stale_benchmark_containers() -> None:
+    prefixes = ("wbc-sim-", "wbc-sonic-", "wbc-holo-", "wbc-holo-bridge-")
+    exact = {"unitree_mujoco"}
+    proc = subprocess.run(
+        ["docker", "ps", "--format", "{{.Names}}"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return
+    stale = [
+        name
+        for name in proc.stdout.splitlines()
+        if name in exact or any(name.startswith(prefix) for prefix in prefixes)
+    ]
+    for name in stale:
+        docker_rm_force(name)
+    if stale:
+        print(json.dumps({"cleanup_stale_containers": stale}), flush=True)
+
+
 def docker_base_args(name: str, image: str, *, tty: bool = False) -> list[str]:
     args = ["docker", "run", "--rm", "--name", name, "--network", "host"]
     gpu_request = os.environ.get("WBC_DOCKER_GPUS")
@@ -1680,6 +1702,7 @@ def run_holomotion_sequence(args: argparse.Namespace, run_dir: Path, control_fil
 
 
 def run_motion(args: argparse.Namespace) -> int:
+    cleanup_stale_benchmark_containers()
     logs_root = Path(args.logs)
     if not logs_root.is_absolute():
         logs_root = ROOT / logs_root
