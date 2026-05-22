@@ -100,6 +100,7 @@ These are operational hints, not substitutes for the hard gates. Add new hints h
 10. HoloMotion v1.3 stock deploy still failed `dance_chicken_c03_neutral2s` after initializing the simulator from that HoloMotion NPZ frame 0; the run reached valid release order, then fell during motion tracking with RMSE around `0.421`. Root initialization alone is not the missing contract.
 11. HoloMotion v1.3 stock deploy with simulator `--publish-every 4` missed the current one-shot D-pad clip-selection pulse and timed out before release. Keep HoloMotion at the current higher low-state publish cadence unless the selection transport is changed deliberately.
 12. Do not use the ad-hoc HoloMotion `eval_mujoco_sim2sim.py` diagnostic as standalone impossibility proof yet. With the local headless CPU invocation and `assets/robots/unitree/G1/29dof/g1_29dof_rev_1_0.xml`, it fails `dance_chicken_c04_neutral2s` too (joint RMSE about `0.496`, base height below `0.25m` around frame 58), even though the stock deploy path tracks C04 under the RMSE gate in `unitree_mujoco`. Treat these diagnostics as a clue about invocation/model-context mismatch, not as authoritative evidence that a clip is impossible.
+13. Fresh current-code full batch `logs_full_v3`/`artifacts_full_v3` clears all SONIC motions and all release-order gates. The remaining RMSE failures are HoloMotion `dance_chicken_c03_neutral2s` (about `0.412`, early-stopped after fall) and HoloMotion `dance_heart111_c01_neutral2s` (about `0.296`, early-stopped after fall).
 
 ## Hints (not requirements)
 
