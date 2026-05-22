@@ -1531,7 +1531,15 @@ def simulator_domain_args(policy: str) -> list[str]:
     return ["--domain-id", "0" if policy == "sonic" else "1"]
 
 
-def start_simulator(run_dir: Path, control_file: Path, duration_s: float, name: str, policy: str, motion: str) -> ManagedProcess:
+def start_simulator(
+    run_dir: Path,
+    control_file: Path,
+    duration_s: float,
+    name: str,
+    policy: str,
+    motion: str,
+    support_height: float,
+) -> ManagedProcess:
     docker_rm_force(name)
     cmd = docker_base_args(name, SIM_IMAGE) + [
         "python3",
@@ -1550,6 +1558,8 @@ def start_simulator(run_dir: Path, control_file: Path, duration_s: float, name: 
         "50",
         "--publish-every",
         "4" if policy == "sonic" else "1",
+        "--support-height",
+        f"{support_height:.3f}",
         "--out-dir",
         f"/workspace/wbc/{run_dir.relative_to(ROOT)}",
         "--control-file",
@@ -1774,7 +1784,15 @@ def run_motion(args: argparse.Namespace) -> int:
     if args.policy == "sonic":
         ensure_sonic_built()
     sim_name = f"wbc-sim-{args.policy}-{args.motion[:24]}-{int(time.time())}"
-    sim = start_simulator(run_dir, control_file, sim_duration, sim_name, args.policy, args.motion)
+    sim = start_simulator(
+        run_dir,
+        control_file,
+        sim_duration,
+        sim_name,
+        args.policy,
+        args.motion,
+        args.support_height,
+    )
     try:
         if args.policy == "sonic":
             run_sonic_sequence(args, run_dir, control_file, event_log, sim)
@@ -2160,6 +2178,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     p.add_argument("--policy-ready-timeout-s", type=float, default=120.0)
     p.add_argument("--holomotion-default-wait-s", type=float, default=5.0)
     p.add_argument("--sonic-post-release-wait-s", type=float, default=None)
+    p.add_argument("--support-height", type=float, default=0.75)
     p.add_argument("--skip-gpu-preflight", action="store_true")
     p.set_defaults(func=run_motion)
     p = sub.add_parser("run-all-motions")
@@ -2169,6 +2188,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     p.add_argument("--policy-ready-timeout-s", type=float, default=120.0)
     p.add_argument("--holomotion-default-wait-s", type=float, default=5.0)
     p.add_argument("--sonic-post-release-wait-s", type=float, default=None)
+    p.add_argument("--support-height", type=float, default=0.75)
     p.add_argument("--skip-gpu-preflight", action="store_true")
     p.set_defaults(func=run_all_motions)
     p = sub.add_parser("docker-build")
