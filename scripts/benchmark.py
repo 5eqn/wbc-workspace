@@ -133,6 +133,9 @@ HARDWARE_FROM_SONIC_POLICY = [
     28,
 ]
 SONIC_BODY_PART_INDEXES = [0, 4, 10, 18, 5, 11, 19, 9, 16, 22, 28, 17, 23, 29]
+SONIC_POST_RELEASE_WAIT_BY_MOTION = {
+    "dance_phony_c01_neutral2s": 0.5,
+}
 
 
 class SequenceEventLog:
@@ -1592,8 +1595,19 @@ def run_sonic_sequence(args: argparse.Namespace, run_dir: Path, control_file: Pa
             detail=marker,
         )
         release_support(run_dir, control_file, event_log, "release simulator support after SONIC CONTROL")
-        if args.sonic_post_release_wait_s > 0.0:
-            time.sleep(args.sonic_post_release_wait_s)
+        post_release_wait_s = (
+            args.sonic_post_release_wait_s
+            if args.sonic_post_release_wait_s is not None
+            else SONIC_POST_RELEASE_WAIT_BY_MOTION.get(args.motion, 0.0)
+        )
+        if post_release_wait_s > 0.0:
+            event_log.append(
+                "post_release_settle_elapsed",
+                sim_time_s=latest_sim_time(run_dir),
+                support_active=0,
+                detail=f"seconds={post_release_wait_s:.3f}",
+            )
+            time.sleep(post_release_wait_s)
         policy.send("T")
         event_log.append(
             "sent_key_T",
@@ -2105,7 +2119,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     p.add_argument("--startup-margin-s", type=float, default=120.0)
     p.add_argument("--policy-ready-timeout-s", type=float, default=120.0)
     p.add_argument("--holomotion-default-wait-s", type=float, default=5.0)
-    p.add_argument("--sonic-post-release-wait-s", type=float, default=0.0)
+    p.add_argument("--sonic-post-release-wait-s", type=float, default=None)
     p.add_argument("--skip-gpu-preflight", action="store_true")
     p.set_defaults(func=run_motion)
     p = sub.add_parser("run-all-motions")
@@ -2114,7 +2128,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     p.add_argument("--startup-margin-s", type=float, default=120.0)
     p.add_argument("--policy-ready-timeout-s", type=float, default=120.0)
     p.add_argument("--holomotion-default-wait-s", type=float, default=5.0)
-    p.add_argument("--sonic-post-release-wait-s", type=float, default=0.0)
+    p.add_argument("--sonic-post-release-wait-s", type=float, default=None)
     p.add_argument("--skip-gpu-preflight", action="store_true")
     p.set_defaults(func=run_all_motions)
     p = sub.add_parser("docker-build")
