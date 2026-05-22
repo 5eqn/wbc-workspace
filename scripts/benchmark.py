@@ -75,6 +75,17 @@ SIM_IMAGE = "wbc-unitree_mujoco"
 SONIC_IMAGE = "wbc-gear-sonic"
 HOLO_IMAGE = "wbc-holomotion"
 GLOBAL_IMPOSSIBILITY = "impossibility.json"
+REPORT_OUTPUT_FILES = [
+    "metrics_summary.json",
+    "phase_time_proof.json",
+    "rmse_summary.csv",
+    "per_joint_rmse.csv",
+    "release_validation.json",
+    "single_robot_interface.json",
+    "comparison_videos.json",
+    "report.md",
+    GLOBAL_IMPOSSIBILITY,
+]
 HOLO_KEY_BITS = {
     "start": 1 << 2,
     "select": 1 << 3,
@@ -973,7 +984,7 @@ def validate_single_robot_interface(logs: Path, artifacts: Path) -> tuple[dict, 
 def report(args: argparse.Namespace) -> int:
     logs = Path(args.logs)
     artifacts = Path(args.artifacts)
-    artifacts.mkdir(parents=True, exist_ok=True)
+    clean_report_artifacts(artifacts)
     impossibility = load_global_impossibility(logs)
     if impossibility is not None:
         write_impossibility_artifacts(artifacts, impossibility)
@@ -1096,6 +1107,15 @@ def write_metric_csvs(artifacts: Path, summary: dict) -> None:
                 for i, value in enumerate(item["joint_rmse_rad"][:29]):
                     values[f"joint_{i}"] = value
                 writer.writerow(values)
+
+
+def clean_report_artifacts(artifacts: Path) -> None:
+    artifacts.mkdir(parents=True, exist_ok=True)
+    generated = [artifacts / name for name in REPORT_OUTPUT_FILES]
+    generated.extend(artifacts / f"{motion}_comparison.mp4" for motion in MOTIONS)
+    for path in generated:
+        if path.is_file() or path.is_symlink():
+            path.unlink()
 
 
 def make_all_comparison_videos(logs: Path, artifacts: Path, rows: list[dict]) -> list[str]:
@@ -1962,6 +1982,9 @@ def ensure_sonic_built() -> None:
     docker_rm_force(name)
     script = (
         "cd /workspace/wbc/thirdparties/GR00T-WholeBodyControl/gear_sonic_deploy && "
+        "if [ -f build/CMakeCache.txt ] && "
+        "! grep -q '/workspace/wbc/thirdparties/GR00T-WholeBodyControl/gear_sonic_deploy' build/CMakeCache.txt; "
+        "then rm -rf build; fi && "
         "source /opt/ros/humble/setup.bash && "
         "source scripts/setup_env.sh && "
         "just build && "
@@ -2427,11 +2450,9 @@ def run_motion(args: argparse.Namespace) -> int:
     run_dir = Path(args.logs) / args.policy / args.motion
     if not run_dir.is_absolute():
         run_dir = ROOT / run_dir
-    run_dir.mkdir(parents=True, exist_ok=True)
+    clean_run_dir(run_dir)
     control_file = run_dir / "sim_control.json"
     event_path = run_dir / "sequence_events.csv"
-    if event_path.exists():
-        event_path.unlink()
     event_log = SequenceEventLog(event_path)
     args.motion_duration_s = args.duration_s or policy_motion_duration(args.policy, args.motion)
     sim_duration = args.motion_duration_s + args.startup_margin_s
