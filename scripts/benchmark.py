@@ -1340,6 +1340,20 @@ def release_support(run_dir: Path, control_file: Path, event_log: SequenceEventL
     )
 
 
+def wait_for_motion_window(sim: ManagedProcess, duration_s: float, event_log: SequenceEventLog, run_dir: Path) -> None:
+    deadline = time.monotonic() + duration_s
+    while time.monotonic() < deadline:
+        code = sim.poll()
+        if code is not None:
+            event_log.append(
+                "simulator_ended_during_motion",
+                sim_time_s=latest_sim_time(run_dir),
+                detail=f"simulator process exited with code {code}",
+            )
+            return
+        time.sleep(min(0.10, max(0.0, deadline - time.monotonic())))
+
+
 def policy_motion_duration(policy: str, motion: str) -> float:
     del policy
     path = ROOT / "assets" / "motions" / "sonic_motions" / motion / "joint_pos.csv"
@@ -1548,7 +1562,13 @@ def start_simulator(run_dir: Path, control_file: Path, duration_s: float, name: 
     return proc
 
 
-def run_sonic_sequence(args: argparse.Namespace, run_dir: Path, control_file: Path, event_log: SequenceEventLog) -> None:
+def run_sonic_sequence(
+    args: argparse.Namespace,
+    run_dir: Path,
+    control_file: Path,
+    event_log: SequenceEventLog,
+    sim: ManagedProcess,
+) -> None:
     motion_root = copy_sonic_single_motion(run_dir, args.motion)
     stock_csv_dir = run_dir / "csv"
     name = f"wbc-sonic-{args.motion[:32]}-{int(time.time())}"
@@ -1616,14 +1636,20 @@ def run_sonic_sequence(args: argparse.Namespace, run_dir: Path, control_file: Pa
             support_active=0,
             detail="stock SONIC keyboard playback trigger after confirmed release",
         )
-        time.sleep(args.motion_duration_s)
+        wait_for_motion_window(sim, args.motion_duration_s, event_log, run_dir)
     finally:
         update_control_file(control_file, stop=True)
         policy.terminate()
         docker_rm_force(name)
 
 
-def run_holomotion_sequence(args: argparse.Namespace, run_dir: Path, control_file: Path, event_log: SequenceEventLog) -> None:
+def run_holomotion_sequence(
+    args: argparse.Namespace,
+    run_dir: Path,
+    control_file: Path,
+    event_log: SequenceEventLog,
+    sim: ManagedProcess,
+) -> None:
     name = f"wbc-holo-{args.motion[:32]}-{int(time.time())}"
     bridge_name = f"wbc-holo-bridge-{args.motion[:24]}-{int(time.time())}"
     docker_rm_force(name)
@@ -1714,7 +1740,7 @@ def run_holomotion_sequence(args: argparse.Namespace, run_dir: Path, control_fil
             support_active=0,
             detail=marker,
         )
-        time.sleep(args.motion_duration_s)
+        wait_for_motion_window(sim, args.motion_duration_s, event_log, run_dir)
     finally:
         update_control_file(control_file, stop=True)
         policy.terminate()
@@ -1751,9 +1777,9 @@ def run_motion(args: argparse.Namespace) -> int:
     sim = start_simulator(run_dir, control_file, sim_duration, sim_name, args.policy, args.motion)
     try:
         if args.policy == "sonic":
-            run_sonic_sequence(args, run_dir, control_file, event_log)
+            run_sonic_sequence(args, run_dir, control_file, event_log, sim)
         else:
-            run_holomotion_sequence(args, run_dir, control_file, event_log)
+            run_holomotion_sequence(args, run_dir, control_file, event_log, sim)
         validate_release_order(run_dir)
     finally:
         update_control_file(control_file, stop=True)

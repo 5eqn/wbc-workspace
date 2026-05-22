@@ -561,6 +561,8 @@ def main() -> int:
     parser.add_argument("--init-reference-format", choices=["sonic_csv", "holomotion_npz"], default="sonic_csv")
     parser.add_argument("--init-reference-frame", type=int, default=0)
     parser.add_argument("--ground-clearance", type=float, default=0.001)
+    parser.add_argument("--fall-stop-base-z", type=float, default=0.25)
+    parser.add_argument("--fall-stop-hold-s", type=float, default=0.20)
     args = parser.parse_args()
     args.publish_every = max(1, args.publish_every)
 
@@ -620,6 +622,8 @@ def main() -> int:
     next_log_t = 0.0
     log_dt = 1.0 / args.log_hz
     step = 0
+    fall_below_since: float | None = None
+    fall_stop = None
 
     try:
         while True:
@@ -646,6 +650,7 @@ def main() -> int:
                 data.qpos[:7] = support_root_qpos
                 data.qvel[:6] = support_root_qvel
                 mujoco.mj_forward(model, data)
+                fall_below_since = None
             if step % args.publish_every == 0:
                 set_wireless_remote(
                     bridge.low_state,
@@ -731,6 +736,30 @@ def main() -> int:
                 lowcmd_f.flush()
                 next_log_t += log_dt
 
+            if (
+                not support_active
+                and args.fall_stop_base_z > 0.0
+                and float(data.qpos[2]) < args.fall_stop_base_z
+            ):
+                if fall_below_since is None:
+                    fall_below_since = float(data.time)
+                elif float(data.time) - fall_below_since >= args.fall_stop_hold_s:
+                    fall_stop = {
+                        "sim_time_s": float(data.time),
+                        "base_z": float(data.qpos[2]),
+                        "threshold": float(args.fall_stop_base_z),
+                        "hold_s": float(args.fall_stop_hold_s),
+                    }
+                    print(
+                        "[sim_bridge] early stop: base_z "
+                        f"{fall_stop['base_z']:.3f} below {fall_stop['threshold']:.3f} "
+                        f"for {fall_stop['hold_s']:.3f}s",
+                        flush=True,
+                    )
+                    break
+            else:
+                fall_below_since = None
+
             sleep_s = sync_mono + (float(data.time) - sync_sim) - time.monotonic()
             if sleep_s > 0:
                 time.sleep(sleep_s)
@@ -749,6 +778,7 @@ def main() -> int:
             "publish_every": args.publish_every,
             "support_height": args.support_height,
             "init_reference": init_summary,
+            "fall_stop": fall_stop,
             "control_file": str(control_path),
         }, indent=2) + "\n"
     )
