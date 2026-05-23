@@ -1,0 +1,7 @@
+{
+  "include": ["scripts"],
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": false,
+  "reportAttributeAccessIssue": false
+}

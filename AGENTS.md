@@ -72,14 +72,17 @@ Results will be reviewed by Claude Opus 4.6 and a human expert in embodied intel
 
 ## Current status
 
-As of 2026-05-22, hard gates 8, 11, and 12 have a passing implementation path in the current code.
+As of 2026-05-23, hard gates 8, 11, and 12 have a passing implementation path in the current code.
 
 - `scripts/sim_bridge.py` is now a low-entropy, policy-agnostic Unitree G1 29DOF DDS/MuJoCo endpoint. It no longer reads motion files, applies SONIC/HoloMotion reference remaps, or uses clip-specific initial poses. It starts from one neutral 29DOF pose, uses root-only simulator support, and uses one simple pre-control hold before real `LowCmd` takes over.
+- `scripts/benchmark.py` is now a thin CLI entrypoint split into flat benchmark-owned modules: common helpers, checks/smokes, runtime orchestration, and report/video generation. SONIC post-release settling is one constant default of `2.0s`, not a per-motion special case.
 - The only retained benchmark evidence directories are now `logs/` and `artifacts/`; development `logs_*` and `artifacts_*` directories were removed after promoting the passing run into the plain paths.
-- Fresh evidence in `logs/` and `artifacts/` passed report checks: `all_rmse_passed=true`, `all_release_gates_passed=true`, `single_robot_interface_passed=true`, and `failures=[]`.
+- Fresh evidence regenerated through `scripts/run.sh` subcommands without rebuilding policy images, followed by `scripts/report.sh`, passed report checks: `all_rmse_passed=true`, `all_release_gates_passed=true`, `single_robot_interface_passed=true`, and `failures=[]`.
 - SONIC passed all 10 motions under the RMSE gate in `artifacts/rmse_summary.csv`. HoloMotion passed 8/10; the remaining failures are the known out-of-distribution balance failures `dance_chicken_c03_neutral2s` and `dance_heart111_c01_neutral2s`.
 - Hard gate 8 release proof passed in `artifacts/release_validation.json`: direct release fell after `0.32s`, released SONIC `CONTROL` remained standing beyond 5 seconds with stable base height, and stopping control caused fall after `0.32s`.
 - Hard gate 11 video proof passed with 10 MuJoCo-rendered comparison MP4s in `artifacts/`.
+- `ruff check scripts`, `pyright`, and Python bytecode compilation passed after the benchmark split.
+- The fresh full-batch SONIC `dance_phony_c01_neutral2s` run passed with RMSE about `0.120` and did not reproduce the paralysed/jitter failure.
 - The observed SONIC `dance_phony_c01_neutral2s` paralysed/jitter failure was not reproduced in clean repeats. Simplified simulator repeats passed at about `0.137`, `0.120`, and `0.123` RMSE; the old simulator path also passed three repeats at about `0.130`, `0.120`, and `0.121`. Treat it as an occasional timing/contact sensitivity unless a reproducible trigger is found.
 - One full-batch SONIC `dance_chicken_c04_neutral2s` run fell during motion and failed RMSE, but a clean rerun passed at `0.166` RMSE and the final report uses the clean raw logs. This suggests occasional instability rather than a deterministic policy or simulator mapping error.
 - Agents must update this Current status section whenever they change the simulator/control path, replace retained evidence, discover a reproducible failure mode, or complete a gate-relevant verification. Do this before ending the task or committing the status-changing work.

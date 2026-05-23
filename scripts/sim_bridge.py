@@ -438,7 +438,6 @@ def main() -> int:
         model.nq,
         model.nv,
     )
-    started_wall = time.time()
     started_mono = time.monotonic()
     sync_mono = started_mono
     sync_sim = float(data.time)
