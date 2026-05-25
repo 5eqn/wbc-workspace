@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Headless Unitree MuJoCo bridge for benchmark orchestration.
+"""Headless Unitree G1 MuJoCo endpoint for benchmark orchestration.
 
-This script is benchmark-owned glue, kept flat under scripts/. It reuses the
-upstream Unitree MuJoCo Python bridge for DDS LowState/LowCmd transport and
-adds only headless stepping, root-only pre-control support, and benchmark logs.
+This script is benchmark-owned simulator glue, kept flat under scripts/. It
+loads a MuJoCo G1 scene directly, speaks the real Unitree SDK2 low-level DDS
+contract, and adds root-only support/release plus benchmark replay logs.
 """
 
 from __future__ import annotations
