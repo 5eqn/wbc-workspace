@@ -1,3 +1,4 @@
-assets/
-artifacts/
-logs/
+assets
+artifacts
+logs
+**/__pycache__
