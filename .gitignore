@@ -2,3 +2,5 @@ assets
 artifacts
 logs
 **/__pycache__
+**/*.png
+**/*.zip

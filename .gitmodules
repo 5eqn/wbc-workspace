@@ -10,3 +10,15 @@
 [submodule "thirdparties/run-sonic"]
 	path = thirdparties/run-sonic
 	url = https://github.com/5eqn/run-sonic
+[submodule "thirdparties/Humanoid-GPT"]
+	path = thirdparties/Humanoid-GPT
+	url = https://github.com/GalaxyGeneralRobotics/Humanoid-GPT
+[submodule "thirdparties/unitree_sim_isaaclab"]
+	path = thirdparties/unitree_sim_isaaclab
+	url = https://github.com/unitreerobotics/unitree_sim_isaaclab
+[submodule "thirdparties/IsaacLab"]
+	path = thirdparties/IsaacLab
+	url = https://github.com/isaac-sim/IsaacLab
+[submodule "thirdparties/cyclonedds"]
+	path = thirdparties/cyclonedds
+	url = https://github.com/eclipse-cyclonedds/cyclonedds

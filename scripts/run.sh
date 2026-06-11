@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 usage() {
-  echo "Usage: $0 [build|validate-assets|prepare-assets|validate-deploy|validate-images|run-motion|run-all-motions|run-release-validation|smoke-release-gate|smoke-sim-bridge|smoke-sim-release|smoke-holomotion|smoke-sonic-build|all]"
+  echo "Usage: $0 [build|build-isaac|validate-assets|prepare-assets|validate-deploy|validate-images|run-motion|run-all-motions|run-release-validation|smoke-release-gate|smoke-sim-bridge|smoke-sim-release|smoke-holomotion|smoke-sonic-build|all]"
 }
 
 cmd="${1:-all}"
@@ -14,6 +14,9 @@ case "$cmd" in
     "$PYTHON_BIN" "$ROOT_DIR/scripts/benchmark.py" docker-build unitree_mujoco
     "$PYTHON_BIN" "$ROOT_DIR/scripts/benchmark.py" docker-build gear-sonic
     "$PYTHON_BIN" "$ROOT_DIR/scripts/benchmark.py" docker-build holomotion
+    ;;
+  build-isaac)
+    "$PYTHON_BIN" "$ROOT_DIR/scripts/benchmark.py" docker-build unitree_isaacsim
     ;;
   validate-assets)
     docker run --rm -v "$ROOT_DIR:/workspace/wbc" -w /workspace/wbc wbc-unitree_mujoco \

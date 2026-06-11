@@ -262,36 +262,74 @@ def start_simulator(
     policy: str,
     motion: str,
     support_height: float,
+    fall_stop_base_z: float,
+    backend: str = "mujoco",
 ) -> ManagedProcess:
     docker_rm_force(name)
-    cmd = docker_base_args(name, SIM_IMAGE) + [
-        "python3",
-        "/workspace/wbc/scripts/sim_bridge.py",
-        "--sim-root",
-        "/workspace/unitree_mujoco",
-        "--robot",
-        "g1",
-        "--interface",
-        "lo",
-        "--duration-s",
-        f"{duration_s:.3f}",
-        "--dt",
-        "0.005",
-        "--log-hz",
-        "50",
-        "--publish-every",
-        "4" if policy == "sonic" else "1",
-        "--support-height",
-        f"{support_height:.3f}",
-        "--out-dir",
-        f"/workspace/wbc/{run_dir.relative_to(ROOT)}",
-        "--control-file",
-        f"/workspace/wbc/{control_file.relative_to(ROOT)}",
-    ] + simulator_domain_args(policy) + simulator_scene_args(policy) + simulator_reference_args(policy, motion)
+    if backend == "mujoco":
+        cmd = docker_base_args(name, SIM_IMAGE) + [
+            "python3",
+            "/workspace/wbc/scripts/sim_bridge.py",
+            "--sim-root",
+            "/workspace/unitree_mujoco",
+            "--robot",
+            "g1",
+            "--interface",
+            "lo",
+            "--duration-s",
+            f"{duration_s:.3f}",
+            "--dt",
+            "0.005",
+            "--log-hz",
+            "50",
+            "--publish-every",
+            "4" if policy == "sonic" else "1",
+            "--support-height",
+            f"{support_height:.3f}",
+            "--fall-stop-base-z",
+            f"{fall_stop_base_z:.3f}",
+            "--out-dir",
+            f"/workspace/wbc/{run_dir.relative_to(ROOT)}",
+            "--control-file",
+            f"/workspace/wbc/{control_file.relative_to(ROOT)}",
+        ] + simulator_domain_args(policy) + simulator_scene_args(policy) + simulator_reference_args(policy, motion)
+    elif backend == "isaac":
+        cmd = docker_base_args(name, ISAAC_SIM_IMAGE) + [
+            "conda",
+            "run",
+            "-n",
+            "unitree_isaacsim",
+            "python",
+            "/workspace/wbc/scripts/isaac_sim_bridge.py",
+            "--task",
+            "Isaac-Move-Cylinder-G129-Dex1-Wholebody",
+            "--interface",
+            "lo",
+            "--duration-s",
+            f"{duration_s:.3f}",
+            "--dt",
+            "0.005",
+            "--log-hz",
+            "50",
+            "--publish-every",
+            "4" if policy == "sonic" else "1",
+            "--support-height",
+            f"{support_height:.3f}",
+            "--fall-stop-base-z",
+            f"{fall_stop_base_z:.3f}",
+            "--out-dir",
+            f"/workspace/wbc/{run_dir.relative_to(ROOT)}",
+            "--control-file",
+            f"/workspace/wbc/{control_file.relative_to(ROOT)}",
+            "--headless",
+        ] + simulator_domain_args(policy) + simulator_reference_args(policy, motion)
+    else:
+        raise ValueError(f"unsupported simulator backend: {backend}")
     proc = ManagedProcess(cmd, run_dir / "simulator_stdout.log")
     proc.start()
-    wait_for_file(control_file, 10.0)
-    wait_for_support_state(run_dir, 1, 10.0)
+    ready_timeout_s = 60.0 if backend == "isaac" else 10.0
+    wait_for_file(control_file, ready_timeout_s)
+    wait_for_support_state(run_dir, 1, ready_timeout_s)
     return proc
 
 
@@ -503,6 +541,8 @@ def run_release_no_control_case(args: argparse.Namespace, root: Path) -> None:
         "holomotion",
         MOTIONS[0],
         args.support_height,
+        args.fall_stop_base_z,
+        getattr(args, "backend", "mujoco"),
     )
     try:
         event_log.append(
@@ -541,6 +581,8 @@ def run_release_sonic_control_case(args: argparse.Namespace, root: Path) -> None
         "sonic",
         motion,
         args.support_height,
+        args.fall_stop_base_z,
+        getattr(args, "backend", "mujoco"),
     )
     policy_name = f"wbc-sonic-release-{int(time.time())}"
     policy = None
@@ -684,6 +726,8 @@ def run_motion(args: argparse.Namespace) -> int:
         args.policy,
         args.motion,
         args.support_height,
+        args.fall_stop_base_z,
+        args.backend,
     )
     try:
         if args.policy == "sonic":

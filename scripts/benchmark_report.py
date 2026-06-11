@@ -352,11 +352,40 @@ def validate_scene_contract(scene: Path) -> dict:
     }
 
 
-def validate_single_robot_interface(logs: Path, artifacts: Path) -> tuple[dict, list[str]]:
+def validate_isaac_scene_contract(scene: Path, run_summaries: dict[str, dict]) -> dict:
+    failures = []
+    if scene.suffix.lower() not in {".usd", ".usda", ".usdc"}:
+        failures.append(f"Isaac backend scene is not a USD asset: {scene}")
+    if not scene.exists():
+        failures.append(f"Isaac backend scene does not exist: {scene}")
+    for tag, summary in run_summaries.items():
+        joint_names = summary.get("body_joint_names")
+        qpos_addresses = summary.get("body_qpos_addresses")
+        isaac_dof_names = summary.get("isaac_dof_names")
+        isaac_body_dof_ids = summary.get("isaac_body_dof_ids")
+        if joint_names != BODY_JOINT_NAMES:
+            failures.append(f"{tag}: body joint order does not match Unitree G1 29DOF order")
+        if qpos_addresses != list(range(7, 36)):
+            failures.append(f"{tag}: Isaac replay qpos addresses are not the expected floating-root 7..35 body joints")
+        if not isinstance(isaac_dof_names, list) or not all(name in isaac_dof_names for name in BODY_JOINT_NAMES):
+            failures.append(f"{tag}: Isaac articulation is missing one or more benchmark body joints")
+        if not isinstance(isaac_body_dof_ids, list) or len(isaac_body_dof_ids) != 29:
+            failures.append(f"{tag}: Isaac articulation did not expose 29 body DOF ids")
+    return {
+        "scene": str(scene),
+        "body_joint_names": BODY_JOINT_NAMES,
+        "expected_body_qpos_addresses": list(range(7, 36)),
+        "passed": not failures,
+        "failures": failures,
+    }
+
+
+def validate_single_robot_interface(logs: Path, artifacts: Path, backend: str = "mujoco") -> tuple[dict, list[str]]:
     failures = []
     run_scenes: dict[str, str] = {}
     run_joint_names: dict[str, list[str]] = {}
     run_qpos_addresses: dict[str, list[int]] = {}
+    run_summaries: dict[str, dict] = {}
     run_dirs = [expected_run_dir(logs, policy, motion) for motion in MOTIONS for policy in POLICIES]
     run_dirs.extend([
         logs / "release_validation" / "no_control_direct_release",
@@ -369,6 +398,7 @@ def validate_single_robot_interface(logs: Path, artifacts: Path) -> tuple[dict, 
             failures.append(f"{tag}: missing sim_bridge_summary.json")
             continue
         summary = json.loads(summary_path.read_text())
+        run_summaries[tag] = summary
         scene = str(summary.get("scene", ""))
         run_scenes[tag] = scene
         joint_names = summary.get("body_joint_names")
@@ -393,14 +423,19 @@ def validate_single_robot_interface(logs: Path, artifacts: Path) -> tuple[dict, 
     scene_contract = None
     if unique_scenes:
         try:
-            scene_contract = validate_scene_contract(logged_scene_path({"summary": {"scene": unique_scenes[0]}}))
+            scene = logged_scene_path({"summary": {"scene": unique_scenes[0]}})
+            if backend == "isaac":
+                scene_contract = validate_isaac_scene_contract(scene, run_summaries)
+            else:
+                scene_contract = validate_scene_contract(scene)
             failures.extend(scene_contract["failures"])
         except Exception as exc:
-            failures.append(f"single 29DOF scene contract unavailable: {exc}")
+            failures.append(f"single {backend} 29DOF scene contract unavailable: {exc}")
 
     proof = {
         "passed": not failures,
-        "expected_active_scene": str(COMMON_SIM_SCENE),
+        "backend": backend,
+        "expected_active_scene": str(ISAAC_SIM_SCENE if backend == "isaac" else COMMON_SIM_SCENE),
         "unique_logged_scenes": unique_scenes,
         "scene_contract": scene_contract,
         "run_scenes": run_scenes,
@@ -427,6 +462,7 @@ def report(args: argparse.Namespace) -> int:
         raise RuntimeError(f"{impossibility_path}: documented-impossibility mode is disabled")
     rows = []
     failures = []
+    nonpassing_motions = []
     timing_rows = []
     for motion in MOTIONS:
         row: dict[str, object] = {"motion": motion}
@@ -445,33 +481,66 @@ def report(args: argparse.Namespace) -> int:
                     metrics["passed_release_gate"] = False
                     metrics["release_gate_error"] = str(exc)
                     failures.append(f"{policy}/{motion}: {exc}")
+                try:
+                    sim_summary = json.loads((run_dir / "sim_bridge_summary.json").read_text())
+                    metrics["fall_stop"] = sim_summary.get("fall_stop")
+                    metrics["passed_fall_gate"] = sim_summary.get("fall_stop") in (None, {})
+                except Exception as exc:
+                    metrics["passed_fall_gate"] = False
+                    metrics["fall_gate_error"] = str(exc)
                 metrics["passed_rmse_gate"] = metrics["mean_joint_rmse_rad"] < 0.2
+                metrics["passed_motion_gate"] = metrics["passed_rmse_gate"] and metrics["passed_fall_gate"]
                 row[policy] = metrics
-                if not metrics["passed_rmse_gate"]:
-                    if policy == "sonic":
-                        failures.append(f"{policy}/{motion}: RMSE {metrics['mean_joint_rmse_rad']:.4f}")
+                if not metrics["passed_motion_gate"]:
+                    nonpassing_motions.append({
+                        "policy": policy,
+                        "motion": motion,
+                        "mean_joint_rmse_rad": metrics["mean_joint_rmse_rad"],
+                        "fall_stop": metrics.get("fall_stop"),
+                        "passed_rmse_gate": metrics["passed_rmse_gate"],
+                        "passed_fall_gate": metrics["passed_fall_gate"],
+                    })
             except Exception as exc:
-                row[policy] = {"error": str(exc), "passed_rmse_gate": False}
-                if policy == "sonic":
-                    failures.append(f"{policy}/{motion}: {exc}")
+                row[policy] = {"error": str(exc), "passed_rmse_gate": False, "passed_motion_gate": False}
+                nonpassing_motions.append({
+                    "policy": policy,
+                    "motion": motion,
+                    "error": str(exc),
+                    "passed_rmse_gate": False,
+                    "passed_fall_gate": False,
+                })
             try:
                 timing_rows.append(timing_proof(run_dir))
             except Exception as exc:
                 failures.append(f"{policy}/{motion}: timing proof unavailable: {exc}")
         rows.append(row)
-    sonic_rmse_passed = all(row["sonic"].get("passed_rmse_gate") is True for row in rows)
-    holomotion_rmse_passed_count = sum(
-        1 for row in rows if row["holomotion"].get("passed_rmse_gate") is True
+    sonic_rmse_required_count = int(getattr(args, "sonic_rmse_required_count", len(MOTIONS)))
+    holomotion_rmse_required_count = int(getattr(args, "holomotion_rmse_required_count", 8))
+    sonic_rmse_passed_count = sum(
+        1 for row in rows if row["sonic"].get("passed_motion_gate") is True
     )
-    all_rmse_passed = sonic_rmse_passed and holomotion_rmse_passed_count >= 8
+    holomotion_rmse_passed_count = sum(
+        1 for row in rows if row["holomotion"].get("passed_motion_gate") is True
+    )
+    sonic_rmse_passed = sonic_rmse_passed_count >= sonic_rmse_required_count
+    all_rmse_passed = (
+        sonic_rmse_passed
+        and holomotion_rmse_passed_count >= holomotion_rmse_required_count
+    )
     all_release_gates_passed = all(
         row[policy].get("passed_release_gate") is True
         for row in rows
         for policy in POLICIES
     )
-    if holomotion_rmse_passed_count < 8:
+    if sonic_rmse_passed_count < sonic_rmse_required_count:
         failures.append(
-            f"holomotion: {holomotion_rmse_passed_count}/10 motions passed RMSE gate, need at least 8"
+            f"sonic: {sonic_rmse_passed_count}/10 motions passed RMSE gate, "
+            f"need at least {sonic_rmse_required_count}"
+        )
+    if holomotion_rmse_passed_count < holomotion_rmse_required_count:
+        failures.append(
+            f"holomotion: {holomotion_rmse_passed_count}/10 motions passed RMSE gate, "
+            f"need at least {holomotion_rmse_required_count}"
         )
     summary = {
         "motions": MOTIONS,
@@ -479,19 +548,22 @@ def report(args: argparse.Namespace) -> int:
         "results": rows,
         "all_rmse_passed": all_rmse_passed,
         "sonic_rmse_passed": sonic_rmse_passed,
+        "sonic_rmse_passed_count": sonic_rmse_passed_count,
+        "sonic_rmse_required_count": sonic_rmse_required_count,
         "holomotion_rmse_passed_count": holomotion_rmse_passed_count,
-        "holomotion_rmse_required_count": 8,
+        "holomotion_rmse_required_count": holomotion_rmse_required_count,
         "all_release_gates_passed": all_release_gates_passed,
+        "nonpassing_motions": nonpassing_motions,
         "failures": failures,
     }
     (artifacts / "phase_time_proof.json").write_text(json.dumps(timing_rows, indent=2) + "\n")
     write_metric_csvs(artifacts, summary)
     _, release_failures = write_release_validation_artifact(logs, artifacts)
     failures.extend(release_failures)
-    single_robot, single_robot_failures = validate_single_robot_interface(logs, artifacts)
+    single_robot, single_robot_failures = validate_single_robot_interface(logs, artifacts, args.backend)
     failures.extend(single_robot_failures)
     summary["single_robot_interface_passed"] = single_robot["passed"]
-    failures.extend(make_all_comparison_videos(logs, artifacts, rows))
+    failures.extend(make_all_comparison_videos(logs, artifacts, rows, args.backend))
     summary["failures"] = failures
     (artifacts / "metrics_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     write_markdown(artifacts / "report.md", summary)
@@ -508,6 +580,8 @@ def write_metric_csvs(artifacts: Path, summary: dict) -> None:
             "mean_joint_rmse_rad",
             "samples",
             "passed_rmse_gate",
+            "passed_fall_gate",
+            "passed_motion_gate",
             "passed_release_gate",
         ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -523,6 +597,8 @@ def write_metric_csvs(artifacts: Path, summary: dict) -> None:
                     "mean_joint_rmse_rad": item.get("mean_joint_rmse_rad", ""),
                     "samples": item.get("samples", ""),
                     "passed_rmse_gate": item.get("passed_rmse_gate", False),
+                    "passed_fall_gate": item.get("passed_fall_gate", False),
+                    "passed_motion_gate": item.get("passed_motion_gate", False),
                     "passed_release_gate": item.get("passed_release_gate", False),
                 })
     with (artifacts / "per_joint_rmse.csv").open("w", newline="") as f:
@@ -554,9 +630,11 @@ def clean_report_artifacts(artifacts: Path) -> None:
             path.unlink()
 
 
-def make_all_comparison_videos(logs: Path, artifacts: Path, rows: list[dict]) -> list[str]:
+def make_all_comparison_videos(logs: Path, artifacts: Path, rows: list[dict], backend: str = "mujoco") -> list[str]:
     failures = []
     videos = []
+    if backend == "isaac":
+        return make_all_isaac_comparison_videos(logs, artifacts, rows)
     for row in rows:
         motion = row["motion"]
         try:
@@ -566,6 +644,201 @@ def make_all_comparison_videos(logs: Path, artifacts: Path, rows: list[dict]) ->
             failures.append(f"{motion}: comparison video unavailable: {exc}")
     (artifacts / "comparison_videos.json").write_text(json.dumps(videos, indent=2) + "\n")
     return failures
+
+
+def find_isaac_articulation_root(prefix: str) -> str:
+    from isaacsim.core.utils.stage import get_current_stage
+    from pxr import UsdPhysics
+
+    stage = get_current_stage()
+    candidates = [
+        str(prim.GetPath())
+        for prim in stage.Traverse()
+        if str(prim.GetPath()).startswith(prefix) and prim.HasAPI(UsdPhysics.ArticulationRootAPI)
+    ]
+    if not candidates:
+        raise ValueError(f"{prefix}: no Isaac articulation root found")
+    return sorted(candidates, key=lambda path: (path.count("/"), path))[0]
+
+
+def make_all_isaac_comparison_videos(logs: Path, artifacts: Path, rows: list[dict]) -> list[str]:
+    failures = []
+    videos = []
+    try:
+        from isaaclab.app import AppLauncher
+
+        app_launcher = AppLauncher({"headless": True, "enable_cameras": True})
+        simulation_app = app_launcher.app
+    except Exception as exc:
+        return [f"Isaac comparison video renderer failed to launch: {exc}"]
+
+    try:
+        for row in rows:
+            motion = row["motion"]
+            try:
+                path = make_isaac_comparison_video(logs, artifacts, motion, row, simulation_app)
+                videos.append({"motion": motion, "path": str(path), "renderer": "isaac"})
+            except Exception as exc:
+                failures.append(f"{motion}: Isaac comparison video unavailable: {exc}")
+    finally:
+        simulation_app.close()
+    (artifacts / "comparison_videos.json").write_text(json.dumps(videos, indent=2) + "\n")
+    return failures
+
+
+def make_isaac_comparison_video(logs: Path, artifacts: Path, motion: str, row: dict, simulation_app) -> Path:
+    import imageio.v2 as imageio
+    import numpy as np
+    import torch
+
+    import isaaclab.sim as sim_utils
+    from isaaclab.sensors.camera import Camera, CameraCfg
+    from isaacsim.core.api import World
+    from isaacsim.core.prims import SingleArticulation
+    from isaacsim.core.utils.stage import add_reference_to_stage
+
+    sides = []
+    for policy in ["holomotion", "sonic"]:
+        run_dir = expected_run_dir(logs, policy, motion)
+        replay = load_replay(run_dir)
+        events = load_events(run_dir)
+        window = validate_replay_window(policy, motion, run_dir, replay, events)
+        sides.append({
+            "policy": policy,
+            "run_dir": run_dir,
+            "replay": replay,
+            "events": events,
+            "window": window,
+            "scene": logged_scene_path(replay),
+            "metrics": row[policy],
+        })
+    unique_scenes = {side["scene"] for side in sides}
+    if len(unique_scenes) != 1:
+        raise ValueError(f"{motion}: Isaac comparison sides used different scenes: {sorted(str(p) for p in unique_scenes)}")
+    scene = next(iter(unique_scenes))
+    if scene.suffix.lower() not in {".usd", ".usda", ".usdc"}:
+        raise ValueError(f"{motion}: Isaac video renderer requires a USD scene, got {scene}")
+
+    World.clear_instance()
+    world = World(physics_dt=0.005, rendering_dt=0.02, stage_units_in_meters=1.0)
+    world.scene.add_default_ground_plane()
+    cfg = sim_utils.DistantLightCfg(intensity=2500.0, color=(0.86, 0.86, 0.80))
+    cfg.func("/World/ReportLight", cfg)
+
+    camera_cfg = CameraCfg(
+        prim_path="/World/ReportCamera",
+        update_period=0,
+        height=480,
+        width=640,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=20.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.05, 100.0),
+        ),
+    )
+    camera = Camera(cfg=camera_cfg)
+    side_offsets = {"holomotion": -4.0, "sonic": 4.0}
+    robots = {}
+    for side in sides:
+        policy = side["policy"]
+        prim_root = f"/World/{policy}"
+        add_reference_to_stage(usd_path=str(scene.resolve()), prim_path=prim_root)
+        robot = SingleArticulation(find_isaac_articulation_root(prim_root), name=f"{policy}_g1")
+        world.scene.add(robot)
+        robots[policy] = {
+            "robot": robot,
+            "joint_indices": np.asarray([int(robot.get_dof_index(name)) for name in BODY_JOINT_NAMES], dtype=np.int32),
+            "offset_y": side_offsets[policy],
+        }
+    world.reset()
+    for _ in range(5):
+        world.step(render=True)
+        camera.update(dt=0.02)
+
+    motion_duration = policy_motion_duration("sonic", motion)
+    pre_roll = max(
+        side["window"]["playback_sim_time_s"] - side["window"]["release_sim_time_s"] + 0.50
+        for side in sides
+    )
+    pre_roll = max(pre_roll, 1.0)
+    max_available_pre = min(
+        side["window"]["playback_sim_time_s"] - float(side["replay"]["sim_time_s"][0])
+        for side in sides
+    )
+    if max_available_pre + 1e-6 < pre_roll:
+        raise ValueError(
+            f"{motion}: replay logs start too late for support-release preroll "
+            f"(need {pre_roll:.3f}s, have {max_available_pre:.3f}s)"
+        )
+
+    fps = 20
+    frame_times = np.arange(-pre_roll, motion_duration + 1e-9, 1.0 / fps)
+    out = artifacts / f"{motion}_comparison.mp4"
+    zero_vel = np.zeros(29, dtype=np.float32)
+    with imageio.get_writer(out, fps=fps, codec="libx264", quality=8, macro_block_size=16) as writer:
+        for phase_t in frame_times:
+            rendered = []
+            for side in sides:
+                replay = side["replay"]
+                policy = side["policy"]
+                sim_time = side["window"]["playback_sim_time_s"] + float(phase_t)
+                idx = nearest_replay_index(replay, sim_time)
+                robot_info = robots[policy]
+                robot = robot_info["robot"]
+                qpos = replay["qpos"][idx]
+                root_pos = np.asarray(qpos[:3], dtype=np.float32).copy()
+                root_pos[1] += float(robot_info["offset_y"])
+                root_quat = np.asarray(qpos[3:7], dtype=np.float32)
+                robot.set_world_pose(position=root_pos, orientation=root_quat)
+                robot.set_joint_positions(
+                    replay["measured_q"][idx].astype(np.float32),
+                    joint_indices=robot_info["joint_indices"],
+                )
+                robot.set_joint_velocities(zero_vel, joint_indices=robot_info["joint_indices"])
+
+                target = np.asarray([root_pos[0], root_pos[1], max(0.65, root_pos[2] + 0.25)], dtype=np.float32)
+                eye = target + np.asarray([-2.7, 2.15, 1.05], dtype=np.float32)
+                camera.set_world_poses_from_view(
+                    torch.as_tensor([eye], dtype=torch.float32),
+                    torch.as_tensor([target], dtype=torch.float32),
+                )
+                world.step(render=True)
+                camera.update(dt=0.02)
+                image = camera.data.output["rgb"][0, ..., :3]
+                if hasattr(image, "detach"):
+                    image = image.detach().cpu().numpy()
+                image = np.asarray(image, dtype=np.uint8)
+
+                metrics = side["metrics"]
+                release_phase = side["window"]["release_sim_time_s"] - side["window"]["playback_sim_time_s"]
+                support = "support" if int(replay["support_active"][idx]) else "released"
+                event = "pre-motion"
+                if abs(phase_t) <= 0.05:
+                    event = "ACTING START"
+                elif phase_t >= motion_duration - 0.05:
+                    event = "ACTING END"
+                elif abs(phase_t - release_phase) <= 0.05:
+                    event = "SUPPORT RELEASE"
+                lines = [
+                    f"{policy} | {motion}",
+                    (
+                        f"phase={phase_t:+.2f}s sim={replay['sim_time_s'][idx]:.2f}s "
+                        f"{support} {event}"
+                    ),
+                    (
+                        f"RMSE={metrics.get('mean_joint_rmse_rad', float('nan')):.3f} "
+                        f"delay={metrics.get('tracking_delay_s', float('nan')):.3f}s "
+                        f"release={release_phase:+.2f}s"
+                    ),
+                ]
+                rendered.append(overlay_text(image, lines))
+            writer.append_data(np.concatenate(rendered, axis=1))
+    validate_video_file(out)
+    world.clear()
+    World.clear_instance()
+    return out
 
 
 def overlay_text(image, lines: list[str]):
@@ -784,4 +1057,14 @@ def write_markdown(path: Path, summary: dict) -> None:
     if summary["failures"]:
         lines.append("## Failures")
         lines.extend(f"- {failure}" for failure in summary["failures"])
+    if summary.get("nonpassing_motions"):
+        lines.extend(["", "## Nonpassing Motions"])
+        for item in summary["nonpassing_motions"]:
+            detail = item.get("error")
+            if detail is None:
+                detail = (
+                    f"RMSE {item.get('mean_joint_rmse_rad', float('nan')):.4f}, "
+                    f"fall gate {item.get('passed_fall_gate')}"
+                )
+            lines.append(f"- {item['policy']}/{item['motion']}: {detail}")
     path.write_text("\n".join(lines) + "\n")

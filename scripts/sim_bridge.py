@@ -13,7 +13,6 @@ import csv
 import json
 from pathlib import Path
 import struct
-import sys
 import time
 from typing import Any
 
@@ -93,16 +92,7 @@ def set_named_joint_qpos(model: Any, data: Any, mujoco: Any, q: list[float]) -> 
         data.qpos[int(model.jnt_qposadr[joint_id])] = float(q[i])
 
 
-def load_upstream_bridge(sim_root: Path, robot: str):
-    bridge_dir = sim_root / "simulate_python"
-    sys.path.insert(0, str(bridge_dir))
-    import config  # type: ignore
-
-    config.ROBOT = robot
-    config.USE_JOYSTICK = 0
-    config.PRINT_SCENE_INFORMATION = False
-    config.ENABLE_ELASTIC_BAND = True
-
+def load_unitree_sdk2py():
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber  # type: ignore
     from unitree_sdk2py.idl.default import (  # type: ignore
         unitree_go_msg_dds__SportModeState_,
@@ -418,7 +408,7 @@ def main() -> int:
     }
     write_control(control_path, control)
 
-    sdk = load_upstream_bridge(sim_root, args.robot)
+    sdk = load_unitree_sdk2py()
     sdk["ChannelFactoryInitialize"](args.domain_id, args.interface)
 
     model = mujoco.MjModel.from_xml_path(str(scene))

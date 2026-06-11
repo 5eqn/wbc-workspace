@@ -71,9 +71,28 @@ COMMON_SIM_SCENE = (
     / "g1"
     / "scene_29dof.xml"
 )
+ISAAC_SIM_SCENE = (
+    ROOT
+    / "thirdparties"
+    / "unitree_sim_isaaclab"
+    / "assets"
+    / "robots"
+    / "g1-29dof_wholebody_dex1"
+    / "g1_29dof_with_dex1_rev_1_0.usd"
+)
 SIM_IMAGE = "wbc-unitree_mujoco"
+ISAAC_SIM_IMAGE = "wbc-unitree_isaacsim"
 SONIC_IMAGE = "wbc-gear-sonic"
 HOLO_IMAGE = "wbc-holomotion"
+BACKENDS = ["mujoco", "isaac"]
+BACKEND_LOG_ROOTS = {
+    "mujoco": ROOT / "logs" / "mujoco-backend-sim2sim",
+    "isaac": ROOT / "logs" / "isaac-backend-sim2sim",
+}
+BACKEND_ARTIFACT_ROOTS = {
+    "mujoco": ROOT / "artifacts" / "mujoco-backend-sim2sim",
+    "isaac": ROOT / "artifacts" / "isaac-backend-sim2sim",
+}
 GLOBAL_IMPOSSIBILITY = "impossibility.json"
 REPORT_OUTPUT_FILES = [
     "metrics_summary.json",
@@ -161,7 +180,7 @@ HARDWARE_FROM_SONIC_POLICY = [
 ]
 SONIC_BODY_PART_INDEXES = [0, 4, 10, 18, 5, 11, 19, 9, 16, 22, 28, 17, 23, 29]
 SONIC_POST_RELEASE_WAIT_S = 2.0
-HOLOMOTION_POST_RELEASE_VELOCITY_HOLD_S = 5.0
+HOLOMOTION_POST_RELEASE_VELOCITY_HOLD_S = 0.0
 
 class SequenceEventLog:
     """Append-only release-order event log for real benchmark runs."""
@@ -580,7 +599,7 @@ def docker_rm_force(name: str) -> None:
 
 def cleanup_stale_benchmark_containers() -> None:
     prefixes = ("wbc-sim-", "wbc-sonic-", "wbc-holo-", "wbc-holo-bridge-")
-    exact = {"unitree_mujoco"}
+    exact = {"unitree_mujoco", "unitree_isaacsim"}
     proc = subprocess.run(
         ["docker", "ps", "--format", "{{.Names}}"],
         text=True,
@@ -603,10 +622,21 @@ def cleanup_stale_benchmark_containers() -> None:
 def docker_base_args(name: str, image: str, *, tty: bool = False) -> list[str]:
     args = ["docker", "run", "--rm", "--name", name, "--network", "host"]
     gpu_request = os.environ.get("WBC_DOCKER_GPUS")
-    if gpu_request is None and image in {SONIC_IMAGE, HOLO_IMAGE} and shutil.which("nvidia-smi"):
+    if gpu_request is None and image in {SONIC_IMAGE, HOLO_IMAGE, ISAAC_SIM_IMAGE} and shutil.which("nvidia-smi"):
         gpu_request = "all"
     if gpu_request:
         args.extend(["--gpus", gpu_request])
+    if image == ISAAC_SIM_IMAGE:
+        args.extend([
+            "-e",
+            "ACCEPT_EULA=Y",
+            "-e",
+            "OMNI_KIT_ACCEPT_EULA=Y",
+            "-e",
+            "OMNI_KIT_ALLOW_ROOT=1",
+            "-e",
+            "OMNI_KIT_DISABLE_STARTUP=1",
+        ])
     if tty:
         args.extend(["-i", "-t"])
     args.extend(["-v", f"{ROOT}:/workspace/wbc", image])

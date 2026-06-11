@@ -5,7 +5,40 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 ASSETS_DIR="$PROJECT_ROOT/assets"
+THIRDPARTIES_DIR="$PROJECT_ROOT/thirdparties"
 mkdir -p "$ASSETS_DIR"
+mkdir -p "$THIRDPARTIES_DIR"
+
+clone_or_update_repo() {
+    local name="$1"
+    local url="$2"
+    local commit="$3"
+    local path="$THIRDPARTIES_DIR/$name"
+
+    if [ ! -d "$path/.git" ]; then
+        echo "[download_assets] Cloning $name..."
+        git clone "$url" "$path"
+    fi
+    git -C "$path" fetch --all --tags
+    git -C "$path" checkout "$commit"
+}
+
+clone_or_update_repo \
+    "unitree_sim_isaaclab" \
+    "https://github.com/unitreerobotics/unitree_sim_isaaclab.git" \
+    "e30c25b1dffdf92ada1d6c8c1fe9a47bdde0fecc"
+git -C "$THIRDPARTIES_DIR/unitree_sim_isaaclab" submodule update --init --depth 1
+
+clone_or_update_repo \
+    "IsaacLab" \
+    "https://github.com/isaac-sim/IsaacLab.git" \
+    "54a65ea830c6002e17dc18c77831fa60e43937bc"
+
+clone_or_update_repo \
+    "cyclonedds" \
+    "https://github.com/eclipse-cyclonedds/cyclonedds.git" \
+    "5041f3560c088c99e5088b2b8520b69169621196"
+
 cd "$ASSETS_DIR"
 
 # --- hf (huggingface_hub) ---

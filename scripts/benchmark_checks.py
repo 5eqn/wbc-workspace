@@ -224,6 +224,16 @@ def validate_images(_: argparse.Namespace) -> int:
             "import zmq\n"
             "PY",
         ),
+        docker_check(
+            "wbc-unitree_isaacsim",
+            "check_path() { test -e \"$1\" || { echo \"missing: $1\"; exit 1; }; }\n"
+            "check_path /home/code/IsaacLab/isaaclab.sh\n"
+            "check_path /home/code/unitree_sim_isaaclab/tasks/__init__.py\n"
+            "conda run -n unitree_isaacsim python - <<'PY'\n"
+            "import isaacsim, isaaclab, tasks, unitree_sdk2py\n"
+            "from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_\n"
+            "PY",
+        ),
     ]
     failures = [item for item in checks if not item["ok"]]
     print(json.dumps({"ok": not failures, "checks": checks}, indent=2))
@@ -422,4 +432,3 @@ def docker(args: argparse.Namespace) -> int:
     cmd = ["docker", "build", "-f", str(dockerfile), "-t", image, str(ROOT)]
     print("+ " + " ".join(cmd), flush=True)
     return subprocess.call(cmd)
-
