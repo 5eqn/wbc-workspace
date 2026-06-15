@@ -42,8 +42,9 @@ MOTIONS = [
     "walking_quip_360_R_002__A428_neutral2s",
 ]
 
-POLICIES = ["sonic", "holomotion"]
+POLICIES = ["sonic", "holomotion", "humanoid-gpt"]
 ROOT = Path(__file__).resolve().parents[1]
+HUMANOID_GPT_REFERENCE_PHASE_COMPENSATION_S = 0.50
 RELEASE_EVENT_LOGS = ["sequence_events.csv", "holomotion_sequence_events.csv"]
 CONTROL_EVENT = "control_state_observed"
 RELEASE_REQUEST_EVENT = "release_file_touched"
@@ -60,6 +61,9 @@ EVENT_LOG_FIELDS = [
 HOLOMOTION_MIN_TAG = "v1.3.0"
 SONIC_DEPLOY = ROOT / "thirdparties" / "GR00T-WholeBodyControl" / "gear_sonic_deploy"
 HOLO_DEPLOY = ROOT / "thirdparties" / "HoloMotion" / "deployment" / "unitree_g1_ros2_29dof"
+HUMANOID_GPT_REPO = ROOT / "thirdparties" / "Humanoid-GPT"
+HUMANOID_GPT_ENV = "h-gpt"
+HUMANOID_GPT_TRACK_DIR = ROOT / "logs" / "humanoid-gpt-translation" / "converted_from_holomotion"
 COMMON_SIM_SCENE = (
     ROOT
     / "thirdparties"
@@ -255,6 +259,16 @@ def load_reference(policy: str, motion: str) -> tuple[np.ndarray, float]:
     if policy == "sonic":
         q = read_csv_matrix(ROOT / "assets" / "motions" / "sonic_motions" / motion / "joint_pos.csv")
         return q[:, HARDWARE_FROM_SONIC_POLICY], 50.0
+    if policy == "humanoid-gpt":
+        path = HUMANOID_GPT_TRACK_DIR / f"{motion}.npz"
+        data = np.load(path, allow_pickle=False)
+        if "dof_pos" in data:
+            q = np.asarray(data["dof_pos"], dtype=np.float64)
+        elif "qpos" in data:
+            q = np.asarray(data["qpos"], dtype=np.float64)[:, 7:36]
+        else:
+            raise KeyError(f"{path}: missing dof_pos/qpos array")
+        return q[:, :29], float(np.asarray(data.get("frequency", 50.0), dtype=np.float64))
     path = ROOT / "assets" / "motions" / "holomotion_motions" / f"{motion}_holomotion.npz"
     data = np.load(path)
     for key in ("ref_dof_pos", "dof_pos"):
@@ -324,20 +338,34 @@ def interpolate_ref(ref: np.ndarray, ref_hz: float, query_t: np.ndarray, delay_s
     return np.stack(cols, axis=1)
 
 
-def aligned_rmse(ref: np.ndarray, ref_hz: float, tracked_t: np.ndarray, tracked_q: np.ndarray) -> dict:
+def policy_reference_phase_compensation_s(policy: str) -> float:
+    return HUMANOID_GPT_REFERENCE_PHASE_COMPENSATION_S if policy == "humanoid-gpt" else 0.0
+
+
+def aligned_rmse(
+    ref: np.ndarray,
+    ref_hz: float,
+    tracked_t: np.ndarray,
+    tracked_q: np.ndarray,
+    phase_compensation_s: float = 0.0,
+    residual_delay_window_s: float = 0.2,
+) -> dict:
     import numpy as np
 
     n = min(tracked_q.shape[1], ref.shape[1], 29)
     tracked_q = tracked_q[:, :n]
     best = None
-    for delay in np.arange(-0.2, 0.2001, 0.01):
-        rq = interpolate_ref(ref[:, :n], ref_hz, tracked_t, float(delay))
+    for residual_delay in np.arange(-residual_delay_window_s, residual_delay_window_s + 0.0001, 0.01):
+        effective_delay = float(phase_compensation_s + residual_delay)
+        rq = interpolate_ref(ref[:, :n], ref_hz, tracked_t, effective_delay)
         err = tracked_q - rq
         rmse = np.sqrt(np.mean(err * err, axis=0))
         mean = float(np.mean(rmse))
         if best is None or mean < best["mean_joint_rmse_rad"]:
             best = {
-                "tracking_delay_s": round(float(delay), 4),
+                "tracking_delay_s": round(effective_delay, 4),
+                "residual_tracking_delay_s": round(float(residual_delay), 4),
+                "reference_phase_compensation_s": round(float(phase_compensation_s), 4),
                 "mean_joint_rmse_rad": mean,
                 "joint_rmse_rad": rmse.tolist(),
                 "samples": int(tracked_q.shape[0]),
@@ -864,11 +892,22 @@ def wait_for_sim_window(sim: ManagedProcess, duration_s: float) -> int | None:
 
 
 def policy_motion_duration(policy: str, motion: str) -> float:
-    del policy
-    path = ROOT / "assets" / "motions" / "sonic_motions" / motion / "joint_pos.csv"
-    with path.open(newline="") as f:
-        frames = max(0, sum(1 for _ in f) - 1)
-    return float(frames) / 50.0
+    ref, hz = load_reference(policy, motion)
+    return float(ref.shape[0]) / float(hz)
+
+
+def policy_arg_key(policy: str) -> str:
+    return policy.replace("-", "_")
+
+
+def rmse_required_count_arg(policy: str) -> str:
+    return f"{policy_arg_key(policy)}_rmse_required_count"
+
+
+def default_rmse_required_count(backend: str, policy: str) -> int:
+    if backend == "isaac":
+        return 7
+    return 8 if policy == "holomotion" else len(MOTIONS)
 
 
 def logged_scene_path(replay: dict) -> Path:

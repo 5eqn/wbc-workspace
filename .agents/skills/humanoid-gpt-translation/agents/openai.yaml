@@ -1,0 +1,4 @@
+interface:
+  display_name: "Humanoid-GPT Translation"
+  short_description: "Translate SONIC and HoloMotion motions into Humanoid-GPT format"
+  default_prompt: "Use $humanoid-gpt-translation to translate SONIC and HoloMotion motions into Humanoid-GPT format and verify equivalence."

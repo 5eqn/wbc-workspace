@@ -1,0 +1,4 @@
+interface:
+  display_name: "Benchmark Single Motion"
+  short_description: "Run and inspect one policy-motion pair on one backend"
+  default_prompt: "Use $benchmark-single-motion to run and inspect one policy-motion pair on one backend in this repo."

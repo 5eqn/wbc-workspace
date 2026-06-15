@@ -1,0 +1,4 @@
+interface:
+  display_name: "Humanoid-GPT Sim2Sim"
+  short_description: "Run Humanoid-GPT inside the shared MuJoCo benchmark path"
+  default_prompt: "Use $humanoid-gpt-sim2sim to run Humanoid-GPT inside the shared MuJoCo benchmark path for this repo."

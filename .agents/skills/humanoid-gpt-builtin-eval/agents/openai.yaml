@@ -1,0 +1,4 @@
+interface:
+  display_name: "Humanoid-GPT Builtin Eval"
+  short_description: "Run official Humanoid-GPT evaluation and render outputs"
+  default_prompt: "Use $humanoid-gpt-builtin-eval to run official Humanoid-GPT evaluation and render outputs for translated motions."

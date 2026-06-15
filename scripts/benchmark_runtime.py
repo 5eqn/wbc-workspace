@@ -16,6 +16,14 @@ def tap_holomotion_key(control_file: Path, key: str, *, gap_s: float = 0.20) -> 
     time.sleep(gap_s)
 
 
+def pulse_remote_key(control_file: Path, key: str, *, hold_s: float = 0.16, gap_s: float = 0.16) -> None:
+    pulse_holomotion_key(control_file, key, hold_s=hold_s, gap_s=gap_s)
+
+
+def tap_remote_key(control_file: Path, key: str, *, gap_s: float = 0.20) -> None:
+    tap_holomotion_key(control_file, key, gap_s=gap_s)
+
+
 def wait_for_new_log_marker(log_path: Path, marker: str, start_offset: int, timeout_s: float) -> tuple[int, str]:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -521,6 +529,113 @@ def run_holomotion_sequence(
         docker_rm_force(bridge_name)
 
 
+def humanoid_gpt_motion_file(motion: str) -> Path:
+    return HUMANOID_GPT_TRACK_DIR / f"{motion}.npz"
+
+
+def run_humanoid_gpt_sequence(
+    args: argparse.Namespace,
+    run_dir: Path,
+    control_file: Path,
+    event_log: SequenceEventLog,
+    sim: ManagedProcess,
+) -> None:
+    motion_file = humanoid_gpt_motion_file(args.motion)
+    if not motion_file.exists():
+        raise FileNotFoundError(f"missing translated Humanoid-GPT motion: {motion_file}")
+    hgpt_prefix = Path.home() / "miniconda3" / "envs" / HUMANOID_GPT_ENV
+    runtime_lib_dirs = sorted(
+        str(path)
+        for path in hgpt_prefix.glob("lib/python3.12/site-packages/nvidia/*/lib")
+        if path.is_dir()
+    )
+    trt_dir = hgpt_prefix / "lib" / "python3.12" / "site-packages" / "tensorrt_libs"
+    if trt_dir.is_dir():
+        runtime_lib_dirs.append(str(trt_dir))
+    launch_env = ""
+    if runtime_lib_dirs:
+        quoted = ":".join(runtime_lib_dirs)
+        launch_env = (
+            f"export LD_LIBRARY_PATH='{quoted}'"
+            "${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}; "
+        )
+    policy = ManagedProcess(
+        [
+            "bash",
+            "-lc",
+            (
+                f"export CYCLONEDDS_HOME=/home/seqn/cyclonedds/install; "
+                f"{launch_env}"
+                f"conda run --no-capture-output -n {HUMANOID_GPT_ENV} "
+                f"python -u {ROOT / 'scripts' / 'humanoid_gpt_deploy.py'} "
+                f"--motion-file {motion_file} --interface lo --domain-id 1"
+            ),
+        ],
+        run_dir / "humanoid_gpt_stdout.log",
+    )
+    try:
+        policy.start()
+        wait_for_log_marker(policy, policy.log_path, "HGPT_WAITING_FOR_START", args.policy_ready_timeout_s)
+
+        pulse_remote_key(control_file, "start")
+        wait_for_log_marker(policy, policy.log_path, "HGPT_DEFAULT_READY", args.policy_ready_timeout_s)
+
+        pulse_remote_key(control_file, "a")
+        marker = wait_for_log_marker(
+            policy,
+            policy.log_path,
+            "HGPT_CONTROL_READY",
+            args.policy_ready_timeout_s,
+        )
+        event_log.append(
+            CONTROL_EVENT,
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=1,
+            detail=marker,
+        )
+        event_log.append(
+            "motion_selected",
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=1,
+            detail=str(motion_file.relative_to(ROOT)),
+        )
+
+        wait_for_pre_release_hold(run_dir, event_log)
+        release_support(run_dir, control_file, event_log, "release simulator support after Humanoid-GPT CONTROL")
+        if args.humanoid_gpt_post_release_wait_s > 0.0:
+            time.sleep(args.humanoid_gpt_post_release_wait_s)
+            event_log.append(
+                "post_release_hold_elapsed",
+                sim_time_s=latest_sim_time(run_dir),
+                support_active=0,
+                detail=f"seconds={args.humanoid_gpt_post_release_wait_s:.3f}",
+            )
+
+        event_log.append(
+            "sent_key_B",
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=0,
+            detail="Humanoid-GPT offline motion tracking trigger after confirmed release",
+        )
+        pulse_remote_key(control_file, "b")
+        marker = wait_for_log_marker(
+            policy,
+            policy.log_path,
+            "HGPT_MOTION_TRACKING_START",
+            args.policy_ready_timeout_s,
+        )
+        event_log.append(
+            "motion_playing_observed",
+            sim_time_s=latest_sim_time(run_dir),
+            support_active=0,
+            detail=marker,
+        )
+        wait_for_motion_window(sim, args.motion_duration_s, event_log, run_dir)
+    finally:
+        update_control_file(control_file, stop=True)
+        policy.terminate()
+
+
 def clean_run_dir(run_dir: Path) -> None:
     if run_dir.exists():
         shutil.rmtree(run_dir)
@@ -732,6 +847,8 @@ def run_motion(args: argparse.Namespace) -> int:
     try:
         if args.policy == "sonic":
             run_sonic_sequence(args, run_dir, control_file, event_log, sim)
+        elif args.policy == "humanoid-gpt":
+            run_humanoid_gpt_sequence(args, run_dir, control_file, event_log, sim)
         else:
             run_holomotion_sequence(args, run_dir, control_file, event_log, sim)
         validate_release_order(run_dir)

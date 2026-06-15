@@ -9,6 +9,16 @@ def load_reference(policy: str, motion: str) -> tuple[np.ndarray, float]:
     if policy == "sonic":
         q = read_csv_matrix(ROOT / "assets" / "motions" / "sonic_motions" / motion / "joint_pos.csv")
         return q[:, HARDWARE_FROM_SONIC_POLICY], 50.0
+    if policy == "humanoid-gpt":
+        path = HUMANOID_GPT_TRACK_DIR / f"{motion}.npz"
+        data = np.load(path, allow_pickle=False)
+        if "dof_pos" in data:
+            q = np.asarray(data["dof_pos"], dtype=np.float64)
+        elif "qpos" in data:
+            q = np.asarray(data["qpos"], dtype=np.float64)[:, 7:36]
+        else:
+            raise KeyError(f"{path}: missing dof_pos/qpos array")
+        return q[:, :29], float(np.asarray(data.get("frequency", 50.0), dtype=np.float64))
     path = ROOT / "assets" / "motions" / "holomotion_motions" / f"{motion}_holomotion.npz"
     data = np.load(path)
     for key in ("ref_dof_pos", "dof_pos"):
@@ -78,26 +88,40 @@ def interpolate_ref(ref: np.ndarray, ref_hz: float, query_t: np.ndarray, delay_s
     return np.stack(cols, axis=1)
 
 
-def aligned_rmse(ref: np.ndarray, ref_hz: float, tracked_t: np.ndarray, tracked_q: np.ndarray) -> dict:
+def aligned_rmse(
+    ref: np.ndarray,
+    ref_hz: float,
+    tracked_t: np.ndarray,
+    tracked_q: np.ndarray,
+    phase_compensation_s: float = 0.0,
+    residual_delay_window_s: float = 0.2,
+) -> dict:
     import numpy as np
 
     n = min(tracked_q.shape[1], ref.shape[1], 29)
     tracked_q = tracked_q[:, :n]
     best = None
-    for delay in np.arange(-0.2, 0.2001, 0.01):
-        rq = interpolate_ref(ref[:, :n], ref_hz, tracked_t, float(delay))
+    for residual_delay in np.arange(-residual_delay_window_s, residual_delay_window_s + 0.0001, 0.01):
+        effective_delay = float(phase_compensation_s + residual_delay)
+        rq = interpolate_ref(ref[:, :n], ref_hz, tracked_t, effective_delay)
         err = tracked_q - rq
         rmse = np.sqrt(np.mean(err * err, axis=0))
         mean = float(np.mean(rmse))
         if best is None or mean < best["mean_joint_rmse_rad"]:
             best = {
-                "tracking_delay_s": round(float(delay), 4),
+                "tracking_delay_s": round(effective_delay, 4),
+                "residual_tracking_delay_s": round(float(residual_delay), 4),
+                "reference_phase_compensation_s": round(float(phase_compensation_s), 4),
                 "mean_joint_rmse_rad": mean,
                 "joint_rmse_rad": rmse.tolist(),
                 "samples": int(tracked_q.shape[0]),
             }
     assert best is not None
     return best
+
+
+def alignment_shift_s(metrics: dict) -> float:
+    return float(metrics.get("tracking_delay_s", 0.0))
 
 def tracking_window(run_dir: Path, tracked_t, tracked_q):
     try:
@@ -472,7 +496,13 @@ def report(args: argparse.Namespace) -> int:
                 ref, hz = load_reference(policy, motion)
                 t, q = load_tracked(run_dir)
                 t_eval, q_eval, playback_offset = tracking_window(run_dir, t, q)
-                metrics = aligned_rmse(ref, hz, t_eval, q_eval)
+                metrics = aligned_rmse(
+                    ref,
+                    hz,
+                    t_eval,
+                    q_eval,
+                    phase_compensation_s=policy_reference_phase_compensation_s(policy),
+                )
                 if playback_offset is not None:
                     metrics["playback_offset_s"] = playback_offset
                 try:
@@ -514,48 +544,59 @@ def report(args: argparse.Namespace) -> int:
             except Exception as exc:
                 failures.append(f"{policy}/{motion}: timing proof unavailable: {exc}")
         rows.append(row)
-    sonic_rmse_required_count = int(getattr(args, "sonic_rmse_required_count", len(MOTIONS)))
-    holomotion_rmse_required_count = int(getattr(args, "holomotion_rmse_required_count", 8))
-    sonic_rmse_passed_count = sum(
-        1 for row in rows if row["sonic"].get("passed_motion_gate") is True
-    )
-    holomotion_rmse_passed_count = sum(
-        1 for row in rows if row["holomotion"].get("passed_motion_gate") is True
-    )
-    sonic_rmse_passed = sonic_rmse_passed_count >= sonic_rmse_required_count
-    all_rmse_passed = (
-        sonic_rmse_passed
-        and holomotion_rmse_passed_count >= holomotion_rmse_required_count
+    policy_rmse_required_counts = {
+        policy: int(
+            getattr(
+                args,
+                rmse_required_count_arg(policy),
+                default_rmse_required_count(args.backend, policy),
+            )
+        )
+        for policy in POLICIES
+    }
+    policy_rmse_passed_counts = {
+        policy: sum(1 for row in rows if row[policy].get("passed_motion_gate") is True)
+        for policy in POLICIES
+    }
+    all_rmse_passed = all(
+        policy_rmse_passed_counts[policy] >= policy_rmse_required_counts[policy]
+        for policy in POLICIES
     )
     all_release_gates_passed = all(
         row[policy].get("passed_release_gate") is True
         for row in rows
         for policy in POLICIES
     )
-    if sonic_rmse_passed_count < sonic_rmse_required_count:
-        failures.append(
-            f"sonic: {sonic_rmse_passed_count}/10 motions passed RMSE gate, "
-            f"need at least {sonic_rmse_required_count}"
-        )
-    if holomotion_rmse_passed_count < holomotion_rmse_required_count:
-        failures.append(
-            f"holomotion: {holomotion_rmse_passed_count}/10 motions passed RMSE gate, "
-            f"need at least {holomotion_rmse_required_count}"
-        )
+    for policy in POLICIES:
+        passed = policy_rmse_passed_counts[policy]
+        required = policy_rmse_required_counts[policy]
+        if passed < required:
+            failures.append(
+                f"{policy}: {passed}/{len(MOTIONS)} motions passed RMSE gate, need at least {required}"
+            )
     summary = {
         "motions": MOTIONS,
         "policies": POLICIES,
         "results": rows,
         "all_rmse_passed": all_rmse_passed,
-        "sonic_rmse_passed": sonic_rmse_passed,
-        "sonic_rmse_passed_count": sonic_rmse_passed_count,
-        "sonic_rmse_required_count": sonic_rmse_required_count,
-        "holomotion_rmse_passed_count": holomotion_rmse_passed_count,
-        "holomotion_rmse_required_count": holomotion_rmse_required_count,
+        "policy_rmse_passed_counts": policy_rmse_passed_counts,
+        "policy_rmse_required_counts": policy_rmse_required_counts,
         "all_release_gates_passed": all_release_gates_passed,
         "nonpassing_motions": nonpassing_motions,
         "failures": failures,
     }
+    if "sonic" in policy_rmse_passed_counts:
+        summary["sonic_rmse_passed"] = (
+            policy_rmse_passed_counts["sonic"] >= policy_rmse_required_counts["sonic"]
+        )
+        summary["sonic_rmse_passed_count"] = policy_rmse_passed_counts["sonic"]
+        summary["sonic_rmse_required_count"] = policy_rmse_required_counts["sonic"]
+    if "holomotion" in policy_rmse_passed_counts:
+        summary["holomotion_rmse_passed_count"] = policy_rmse_passed_counts["holomotion"]
+        summary["holomotion_rmse_required_count"] = policy_rmse_required_counts["holomotion"]
+    if "humanoid-gpt" in policy_rmse_passed_counts:
+        summary["humanoid_gpt_rmse_passed_count"] = policy_rmse_passed_counts["humanoid-gpt"]
+        summary["humanoid_gpt_rmse_required_count"] = policy_rmse_required_counts["humanoid-gpt"]
     (artifacts / "phase_time_proof.json").write_text(json.dumps(timing_rows, indent=2) + "\n")
     write_metric_csvs(artifacts, summary)
     _, release_failures = write_release_validation_artifact(logs, artifacts)
@@ -698,7 +739,11 @@ def make_isaac_comparison_video(logs: Path, artifacts: Path, motion: str, row: d
     from isaacsim.core.utils.stage import add_reference_to_stage
 
     sides = []
-    for policy in ["holomotion", "sonic"]:
+    side_offsets = {
+        policy: (index - (len(POLICIES) - 1) / 2.0) * 4.0
+        for index, policy in enumerate(POLICIES)
+    }
+    for policy in POLICIES:
         run_dir = expected_run_dir(logs, policy, motion)
         replay = load_replay(run_dir)
         events = load_events(run_dir)
@@ -739,7 +784,6 @@ def make_isaac_comparison_video(logs: Path, artifacts: Path, motion: str, row: d
         ),
     )
     camera = Camera(cfg=camera_cfg)
-    side_offsets = {"holomotion": -4.0, "sonic": 4.0}
     robots = {}
     for side in sides:
         policy = side["policy"]
@@ -757,14 +801,19 @@ def make_isaac_comparison_video(logs: Path, artifacts: Path, motion: str, row: d
         world.step(render=True)
         camera.update(dt=0.02)
 
-    motion_duration = policy_motion_duration("sonic", motion)
+    motion_duration = policy_motion_duration(POLICIES[0], motion)
     pre_roll = max(
-        side["window"]["playback_sim_time_s"] - side["window"]["release_sim_time_s"] + 0.50
+        side["window"]["playback_sim_time_s"]
+        + alignment_shift_s(side["metrics"])
+        - side["window"]["release_sim_time_s"]
+        + 0.50
         for side in sides
     )
     pre_roll = max(pre_roll, 1.0)
     max_available_pre = min(
-        side["window"]["playback_sim_time_s"] - float(side["replay"]["sim_time_s"][0])
+        side["window"]["playback_sim_time_s"]
+        + alignment_shift_s(side["metrics"])
+        - float(side["replay"]["sim_time_s"][0])
         for side in sides
     )
     if max_available_pre + 1e-6 < pre_roll:
@@ -783,7 +832,8 @@ def make_isaac_comparison_video(logs: Path, artifacts: Path, motion: str, row: d
             for side in sides:
                 replay = side["replay"]
                 policy = side["policy"]
-                sim_time = side["window"]["playback_sim_time_s"] + float(phase_t)
+                shift_s = alignment_shift_s(side["metrics"])
+                sim_time = side["window"]["playback_sim_time_s"] + shift_s + float(phase_t)
                 idx = nearest_replay_index(replay, sim_time)
                 robot_info = robots[policy]
                 robot = robot_info["robot"]
@@ -812,7 +862,11 @@ def make_isaac_comparison_video(logs: Path, artifacts: Path, motion: str, row: d
                 image = np.asarray(image, dtype=np.uint8)
 
                 metrics = side["metrics"]
-                release_phase = side["window"]["release_sim_time_s"] - side["window"]["playback_sim_time_s"]
+                release_phase = (
+                    side["window"]["release_sim_time_s"]
+                    - side["window"]["playback_sim_time_s"]
+                    - shift_s
+                )
                 support = "support" if int(replay["support_active"][idx]) else "released"
                 event = "pre-motion"
                 if abs(phase_t) <= 0.05:
@@ -935,7 +989,7 @@ def make_comparison_video(logs: Path, artifacts: Path, motion: str, row: dict) -
     import mujoco
 
     sides = []
-    for policy in ["holomotion", "sonic"]:
+    for policy in POLICIES:
         run_dir = expected_run_dir(logs, policy, motion)
         replay = load_replay(run_dir)
         events = load_events(run_dir)
@@ -963,14 +1017,19 @@ def make_comparison_video(logs: Path, artifacts: Path, motion: str, row: dict) -
             "metrics": row[policy],
         })
 
-    motion_duration = policy_motion_duration("sonic", motion)
+    motion_duration = policy_motion_duration(POLICIES[0], motion)
     pre_roll = max(
-        side["window"]["playback_sim_time_s"] - side["window"]["release_sim_time_s"] + 0.50
+        side["window"]["playback_sim_time_s"]
+        + alignment_shift_s(side["metrics"])
+        - side["window"]["release_sim_time_s"]
+        + 0.50
         for side in sides
     )
     pre_roll = max(pre_roll, 1.0)
     max_available_pre = min(
-        side["window"]["playback_sim_time_s"] - float(side["replay"]["sim_time_s"][0])
+        side["window"]["playback_sim_time_s"]
+        + alignment_shift_s(side["metrics"])
+        - float(side["replay"]["sim_time_s"][0])
         for side in sides
     )
     if max_available_pre + 1e-6 < pre_roll:
@@ -987,7 +1046,8 @@ def make_comparison_video(logs: Path, artifacts: Path, motion: str, row: dict) -
             rendered = []
             for side in sides:
                 replay = side["replay"]
-                sim_time = side["window"]["playback_sim_time_s"] + float(phase_t)
+                shift_s = alignment_shift_s(side["metrics"])
+                sim_time = side["window"]["playback_sim_time_s"] + shift_s + float(phase_t)
                 idx = nearest_replay_index(replay, sim_time)
                 image = render_replay_image(
                     mujoco,
@@ -998,7 +1058,11 @@ def make_comparison_video(logs: Path, artifacts: Path, motion: str, row: dict) -
                     replay["qpos"][idx],
                 )
                 metrics = side["metrics"]
-                release_phase = side["window"]["release_sim_time_s"] - side["window"]["playback_sim_time_s"]
+                release_phase = (
+                    side["window"]["release_sim_time_s"]
+                    - side["window"]["playback_sim_time_s"]
+                    - shift_s
+                )
                 support = "support" if int(replay["support_active"][idx]) else "released"
                 event = "pre-motion"
                 if abs(phase_t) <= 0.05:
@@ -1028,11 +1092,15 @@ def make_comparison_video(logs: Path, artifacts: Path, motion: str, row: dict) -
 
 
 def write_markdown(path: Path, summary: dict) -> None:
+    policy_labels = [policy.replace("-", " ").title() for policy in POLICIES]
+    header_cells = ["Motion"]
+    for label in policy_labels:
+        header_cells.extend([f"{label} RMSE", f"{label} Delay", f"{label} Release"])
     lines = [
         "# WBC Benchmark Report",
         "",
-        "| Motion | SONIC RMSE | SONIC Delay | SONIC Release | HoloMotion RMSE | HoloMotion Delay | HoloMotion Release |",
-        "| --- | ---: | ---: | :---: | ---: | ---: | :---: |",
+        "| " + " | ".join(header_cells) + " |",
+        "| " + " | ".join(["---"] + ["---:" if index % 3 != 2 else ":---:" for index in range(len(POLICIES) * 3)]) + " |",
     ]
     for row in summary["results"]:
         vals = []
@@ -1043,10 +1111,7 @@ def write_markdown(path: Path, summary: dict) -> None:
                 f"{item.get('tracking_delay_s', float('nan')):.3f}" if "tracking_delay_s" in item else "missing",
                 "pass" if item.get("passed_release_gate") else "fail",
             ])
-        lines.append(
-            f"| {row['motion']} | {vals[0]} | {vals[1]} | {vals[2]} | "
-            f"{vals[3]} | {vals[4]} | {vals[5]} |"
-        )
+        lines.append("| " + " | ".join([row["motion"], *vals]) + " |")
     lines.extend([
         "",
         f"All RMSE gates passed: `{summary['all_rmse_passed']}`",

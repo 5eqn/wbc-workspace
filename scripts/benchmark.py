@@ -6,7 +6,16 @@ from __future__ import annotations
 import argparse
 from typing import Iterable
 
-from benchmark_common import BACKENDS, BACKEND_ARTIFACT_ROOTS, BACKEND_LOG_ROOTS, MOTIONS, POLICIES, ROOT
+from benchmark_common import (
+    BACKENDS,
+    BACKEND_ARTIFACT_ROOTS,
+    BACKEND_LOG_ROOTS,
+    MOTIONS,
+    POLICIES,
+    ROOT,
+    default_rmse_required_count,
+    rmse_required_count_arg,
+)
 from benchmark_checks import (
     docker,
     prepare_stock_assets,
@@ -50,6 +59,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     p.add_argument("--artifacts", default=None)
     p.add_argument("--sonic-rmse-required-count", type=int, default=None)
     p.add_argument("--holomotion-rmse-required-count", type=int, default=None)
+    p.add_argument("--humanoid-gpt-rmse-required-count", type=int, default=None)
     p.set_defaults(func=report)
     p = sub.add_parser("run-motion")
     p.add_argument("policy", choices=POLICIES)
@@ -61,6 +71,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     p.add_argument("--policy-ready-timeout-s", type=float, default=120.0)
     p.add_argument("--holomotion-default-wait-s", type=float, default=5.0)
     p.add_argument("--sonic-post-release-wait-s", type=float, default=2.0)
+    p.add_argument("--humanoid-gpt-post-release-wait-s", type=float, default=0.0)
     p.add_argument("--support-height", type=float, default=0.75)
     p.add_argument("--fall-stop-base-z", type=float, default=None)
     p.add_argument("--skip-gpu-preflight", action="store_true")
@@ -73,6 +84,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     p.add_argument("--policy-ready-timeout-s", type=float, default=120.0)
     p.add_argument("--holomotion-default-wait-s", type=float, default=5.0)
     p.add_argument("--sonic-post-release-wait-s", type=float, default=2.0)
+    p.add_argument("--humanoid-gpt-post-release-wait-s", type=float, default=0.0)
     p.add_argument("--support-height", type=float, default=0.75)
     p.add_argument("--fall-stop-base-z", type=float, default=None)
     p.add_argument("--skip-gpu-preflight", action="store_true")
@@ -86,10 +98,10 @@ def main(argv: Iterable[str] | None = None) -> int:
             args.logs = str(BACKEND_LOG_ROOTS[args.backend])
         if getattr(args, "artifacts", None) is None:
             args.artifacts = str(BACKEND_ARTIFACT_ROOTS[args.backend])
-        if getattr(args, "sonic_rmse_required_count", None) is None:
-            args.sonic_rmse_required_count = 7 if args.backend == "isaac" else len(MOTIONS)
-        if getattr(args, "holomotion_rmse_required_count", None) is None:
-            args.holomotion_rmse_required_count = 7 if args.backend == "isaac" else 8
+        for policy in POLICIES:
+            name = rmse_required_count_arg(policy)
+            if hasattr(args, name) and getattr(args, name, None) is None:
+                setattr(args, name, default_rmse_required_count(args.backend, policy))
         if getattr(args, "fall_stop_base_z", None) is None:
             args.fall_stop_base_z = 0.20 if args.backend == "isaac" else 0.25
     return args.func(args)

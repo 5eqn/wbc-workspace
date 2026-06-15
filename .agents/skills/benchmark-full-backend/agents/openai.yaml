@@ -1,0 +1,4 @@
+interface:
+  display_name: "Benchmark Full Backend"
+  short_description: "Run a full backend sweep and generate report artifacts"
+  default_prompt: "Use $benchmark-full-backend to run a full backend sweep and generate report artifacts in this repo."

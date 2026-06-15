@@ -1,0 +1,4 @@
+interface:
+  display_name: "Benchmark Build Validate"
+  short_description: "Build images, validate deploy state, and run smoke checks"
+  default_prompt: "Use $benchmark-build-validate to build benchmark images, validate deploy state, and run smoke checks for this repo."

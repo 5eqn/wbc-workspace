@@ -1,0 +1,4 @@
+interface:
+  display_name: "Benchmark Asset Bootstrap"
+  short_description: "Bootstrap benchmark assets and pinned third-party checkouts"
+  default_prompt: "Use $benchmark-assets-bootstrap to populate or refresh benchmark assets and pinned third-party checkouts for this repo."
