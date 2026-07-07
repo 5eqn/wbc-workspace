@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 from pathlib import Path
 import struct
 import time
@@ -370,6 +371,33 @@ def open_logs(out_dir: Path, num_motor: int, nq: int, nv: int):
     return status_f, lowcmd_f, replay_f, status_writer, lowcmd_writer, replay_writer
 
 
+def launch_interactive_window(model: Any, data: Any, mujoco: Any, trackbodyid: int):
+    display = os.environ.get("DISPLAY", "").strip()
+    if not display:
+        raise RuntimeError("--viewer requires DISPLAY to be set to a reachable X11 display")
+    try:
+        from mujoco import viewer as mujoco_viewer
+    except ImportError as exc:  # pragma: no cover - import failure depends on host env
+        raise RuntimeError("mujoco.viewer is unavailable in the active Python environment") from exc
+    try:
+        # Use passive Simulate so the bridge keeps owning the physics/control
+        # loop while still exposing MuJoCo's interactive UI and reset tools.
+        viewer = mujoco_viewer.launch_passive(model, data, show_left_ui=True, show_right_ui=True)
+    except Exception as exc:  # pragma: no cover - depends on host display stack
+        raise RuntimeError(
+            f"failed to open MuJoCo viewer on DISPLAY={display!r}; "
+            "confirm the X server is reachable from this shell"
+        ) from exc
+    if trackbodyid >= 0:
+        viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+        viewer.cam.trackbodyid = trackbodyid
+    viewer.cam.distance = 3.0
+    viewer.cam.elevation = -20.0
+    viewer.cam.azimuth = 90.0
+    viewer.sync()
+    return viewer
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sim-root", default=str(DEFAULT_SIM_ROOT))
@@ -388,8 +416,11 @@ def main() -> int:
     parser.add_argument("--fall-stop-base-z", type=float, default=0.25)
     parser.add_argument("--fall-stop-hold-s", type=float, default=0.20)
     parser.add_argument("--cmd-timeout-s", type=float, default=0.25)
+    parser.add_argument("--viewer", action="store_true")
+    parser.add_argument("--viewer-fps", type=float, default=60.0)
     args = parser.parse_args()
     args.publish_every = max(1, args.publish_every)
+    args.viewer_fps = max(1.0, float(args.viewer_fps))
 
     import mujoco
 
@@ -421,6 +452,10 @@ def main() -> int:
     bridge = UnitreeG1Bridge(model, data, mujoco, sdk)
     support_root_qpos = data.qpos[:7].copy()
     support_root_qvel = data.qvel[:6].copy()
+    viewer = launch_interactive_window(model, data, mujoco, bridge.torso_body_id) if args.viewer else None
+    fall_stop_enabled = args.fall_stop_base_z > 0.0 and not args.viewer
+    if args.viewer and args.fall_stop_base_z > 0.0:
+        print("[sim_bridge] viewer enabled: disabling fall early stop", flush=True)
 
     status_f, lowcmd_f, replay_f, status_writer, lowcmd_writer, replay_writer = open_logs(
         out_dir,
@@ -433,12 +468,17 @@ def main() -> int:
     sync_sim = float(data.time)
     next_log_t = 0.0
     log_dt = 1.0 / args.log_hz
+    next_viewer_sync_mono = started_mono
+    viewer_dt = 1.0 / args.viewer_fps
     step = 0
     fall_below_since: float | None = None
     fall_stop = None
 
     try:
         while True:
+            if viewer is not None and not viewer.is_running():
+                print("[sim_bridge] viewer closed; stopping simulation", flush=True)
+                break
             elapsed = time.monotonic() - started_mono
             if elapsed >= args.duration_s:
                 break
@@ -572,11 +612,7 @@ def main() -> int:
                 replay_f.flush()
                 next_log_t += log_dt
 
-            if (
-                not support_active
-                and args.fall_stop_base_z > 0.0
-                and float(data.qpos[2]) < args.fall_stop_base_z
-            ):
+            if fall_stop_enabled and not support_active and float(data.qpos[2]) < args.fall_stop_base_z:
                 if fall_below_since is None:
                     fall_below_since = float(data.time)
                 elif float(data.time) - fall_below_since >= args.fall_stop_hold_s:
@@ -596,11 +632,19 @@ def main() -> int:
             else:
                 fall_below_since = None
 
+            if viewer is not None:
+                now_mono = time.monotonic()
+                if now_mono >= next_viewer_sync_mono:
+                    viewer.sync()
+                    next_viewer_sync_mono = now_mono + viewer_dt
+
             sleep_s = sync_mono + (float(data.time) - sync_sim) - time.monotonic()
             if sleep_s > 0:
                 time.sleep(sleep_s)
             step += 1
     finally:
+        if viewer is not None:
+            viewer.close()
         status_f.close()
         lowcmd_f.close()
         replay_f.close()
@@ -617,6 +661,9 @@ def main() -> int:
             "neutral_joint_q": NEUTRAL_JOINT_Q,
             "hold_kp": HOLD_KP,
             "hold_kd": HOLD_KD,
+            "viewer": bool(args.viewer),
+            "viewer_fps": args.viewer_fps,
+            "fall_stop_enabled": fall_stop_enabled,
             "fall_stop": fall_stop,
             "control_file": str(control_path),
             "cmd_timeout_s": args.cmd_timeout_s,

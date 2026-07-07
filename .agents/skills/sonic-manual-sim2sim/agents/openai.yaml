@@ -1,0 +1,4 @@
+interface:
+  display_name: "SONIC Manual Sim2Sim"
+  short_description: "Guide manual host-MuJoCo plus Docker SONIC Sim2Sim runs"
+  default_prompt: "Use $sonic-manual-sim2sim to guide a manual SONIC Sim2Sim run with host-side MuJoCo and interactive Docker SONIC."
