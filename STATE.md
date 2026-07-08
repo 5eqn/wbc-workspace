@@ -15,6 +15,7 @@
 | 2026-06-16T10:37:34+08:00 | SONIC-MANUAL-INTERACTIVE-WINDOW | Changed `scripts/sim_bridge.py --viewer` to open MuJoCo's full interactive Simulate window via the bridge-owned loop, and disabled fall early-stop while that window mode is active so manual reset can be used. |
 | 2026-06-16T11:09:14+08:00 | SONIC-MANUAL-BENCHMARK-SCENE | Switched the manual SONIC host workflow to the same benchmark-owned `GR00T-WholeBodyControl` G1 29-DOF scene used by the automated path, instead of the `unitree_mujoco` host scene. |
 | 2026-07-08T21:02:00+08:00 | BFM-ZERO-FALLEN-RECOVERY | Added a repo-owned three-stage fallen-recovery workflow around `thirdparties/BFM-Zero-deploy`: Stage 1 static fallen-state generation, Stage 2 isolated simulator+deployer replays with keyboard-driven goal selection, Stage 3 offline metrics and tiled video generation, plus failure-only 1080p replay exports and a tracked initial-state failure analysis report. |
+| 2026-07-09T07:04:33+08:00 | BFM-ZERO-STAGE1-STRICT-SAMPLING | Tightened the repo-owned BFM-Zero fallen-recovery workflow so Stage 1 random states must start free of raw ground/self contact, then settle until stable before fallen-state acceptance; Stage 1 now records passive-settle trajectories for all accepted states, Stage 3 renders tiled settle videos plus full-resolution failed settle videos, and the two goal-derived states remain on the original direct frame-extraction path. |
 
 ## Files
 
@@ -33,7 +34,7 @@
 | `scripts/sim_bridge.py` | SONIC-MANUAL-INTERACTIVE-WINDOW | Host-side MuJoCo DDS bridge for split SONIC manual-control runs, with optional interactive Simulate window launch, explicit `DISPLAY` failure reporting, and viewer-mode fall-stop suppression. |
 | `scripts/fallprobe_*.py` | INIT | Fall-probing analysis helpers. |
 | `scripts/humanoid_gpt_*.py` | INIT | Humanoid-GPT translation, built-in evaluation, and deploy entrypoints. |
-| `scripts/bfm_zero_fallen_recovery_eval.py` | BFM-ZERO-FALLEN-RECOVERY | Repo-owned BFM-Zero fallen-recovery CLI with `stage1`, `stage2`, `stage3`, `render-failed-videos`, and `analyze-failures`, plus a hidden headless simulator subprocess path used for isolated deploy replays and offline post-processing. |
+| `scripts/bfm_zero_fallen_recovery_eval.py` | BFM-ZERO-STAGE1-STRICT-SAMPLING | Repo-owned BFM-Zero fallen-recovery CLI with strict Stage 1 random-state contact rejection, settle-until-stable acceptance, per-state Stage 1 settle logs, consolidated Stage 3 video export for Stage 1/Stage 2 trajectories, and preserved direct-extraction goal-derived states. |
 | `thirdparties/BFM-Zero-deploy/sshkeyboard.py` | BFM-ZERO-FALLEN-RECOVERY | Local PTY-friendly keyboard shim that lets the unmodified BFM-Zero deployer consume scripted `n` and `]` key events during automated stage replays. |
 | `BFM_ZERO_FALLEN_RECOVERY_FAILURE_ANALYSIS.md` | BFM-ZERO-FALLEN-RECOVERY | Tracked best-effort report that ranks initial-state features, joint outliers, and self-collision signatures associated with the failed recovery runs from the 100-run BFM-Zero sweep. |
 | `thirdparties/run-sonic/GR00T-WholeBodyControl-main/verification/MANUAL_TEST_GUIDE.md` | HOST-SONIC-SPLIT | Manual SONIC/HoloMotion shared-simulator guide that documents the interactive `N/P`, `]`, and `T` control flow and support-release ordering. |

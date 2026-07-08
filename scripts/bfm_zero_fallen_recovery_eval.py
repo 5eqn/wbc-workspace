@@ -75,8 +75,8 @@ def ensure_runtime_python() -> None:
         return
     if not BFM_ZERO_VENV_PYTHON.is_file():
         return
-    current = Path(sys.executable).resolve()
-    target = BFM_ZERO_VENV_PYTHON.resolve()
+    current = Path(sys.executable).absolute()
+    target = BFM_ZERO_VENV_PYTHON.absolute()
     if current == target:
         return
     env = os.environ.copy()
@@ -94,16 +94,23 @@ def runtime() -> SimpleNamespace:
     os.environ.setdefault("MUJOCO_GL", "egl")
     os.environ.setdefault("OMP_NUM_THREADS", "1")
 
-    import imageio.v2 as imageio
     import joblib
-    import matplotlib
     import mujoco
     import numpy as np
     import torch
     import yaml
+    try:
+        import imageio.v2 as imageio
+    except ModuleNotFoundError:
+        imageio = None
+    try:
+        import matplotlib
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        matplotlib = None
+        plt = None
 
     for path in (BFM_ZERO_DEPLOY_ROOT, BFM_ZERO_TRAIN_ROOT):
         sys.path.insert(0, str(path))
@@ -510,13 +517,198 @@ def cosine_similarity(rt: SimpleNamespace, a: Any, b: Any) -> float:
     return float(rt.np.clip(rt.np.dot(a, b) / denom, -1.0, 1.0))
 
 
-def settle_passively(rt: SimpleNamespace, model: Any, data: Any, settle_steps: int) -> bool:
+def speed_summary(rt: SimpleNamespace, model: Any, data: Any, pelvis_body_id: int, joint_qvel_ids: Any) -> dict[str, float]:
+    rt.mujoco.mj_forward(model, data)
+    root_vel = rt.np.asarray(data.cvel[pelvis_body_id, 3:6], dtype=rt.np.float32)
+    root_ang_vel = rt.np.asarray(data.cvel[pelvis_body_id, 0:3], dtype=rt.np.float32)
+    joint_vel = rt.np.asarray(data.qvel[joint_qvel_ids], dtype=rt.np.float32)
+    joint_vel_rms = float(rt.np.sqrt(rt.np.mean(joint_vel * joint_vel))) if joint_vel.size else 0.0
+    return {
+        "root_lin_speed_mps": float(rt.np.linalg.norm(root_vel)),
+        "root_ang_speed_rps": float(rt.np.linalg.norm(root_ang_vel)),
+        "joint_vel_rms": joint_vel_rms,
+    }
+
+
+def is_near_static(
+    summary: dict[str, float],
+    max_root_speed_mps: float,
+    max_ang_speed_rps: float,
+    max_joint_speed_rms: float,
+) -> bool:
+    return (
+        float(summary["root_lin_speed_mps"]) <= max_root_speed_mps
+        and float(summary["root_ang_speed_rps"]) <= max_ang_speed_rps
+        and float(summary["joint_vel_rms"]) <= max_joint_speed_rms
+    )
+
+
+def stability_sample(
+    rt: SimpleNamespace,
+    data: Any,
+    pelvis_body_id: int,
+    joint_qvel_ids: Any,
+) -> dict[str, Any]:
+    root_pos = rt.np.asarray(data.xpos[pelvis_body_id], dtype=rt.np.float32)
+    root_vel = rt.np.asarray(data.cvel[pelvis_body_id, 3:6], dtype=rt.np.float32)
+    root_ang_vel = rt.np.asarray(data.cvel[pelvis_body_id, 0:3], dtype=rt.np.float32)
+    joint_vel = rt.np.asarray(data.qvel[joint_qvel_ids], dtype=rt.np.float32)
+    joint_vel_rms = float(rt.np.sqrt(rt.np.mean(joint_vel * joint_vel))) if joint_vel.size else 0.0
+    return {
+        "root_pos": root_pos.copy(),
+        "root_speed": float(rt.np.linalg.norm(root_vel)),
+        "root_ang_speed": float(rt.np.linalg.norm(root_ang_vel)),
+        "joint_vel_rms": joint_vel_rms,
+    }
+
+
+def history_is_stable(
+    rt: SimpleNamespace,
+    history: deque[dict[str, Any]],
+    stable_root_speed_mps: float,
+    stable_ang_speed_rps: float,
+    stable_joint_speed_rms: float,
+    stable_root_span_m: float,
+) -> bool:
+    if not history:
+        return False
+    root_span = float(rt.np.linalg.norm(history[-1]["root_pos"] - history[0]["root_pos"]))
+    return (
+        max(sample["root_speed"] for sample in history) <= stable_root_speed_mps
+        and max(sample["root_ang_speed"] for sample in history) <= stable_ang_speed_rps
+        and max(sample["joint_vel_rms"] for sample in history) <= stable_joint_speed_rms
+        and root_span <= stable_root_span_m
+    )
+
+
+def contact_summary_for_current_state(rt: SimpleNamespace, model: Any, data: Any) -> dict[str, Any]:
+    self_pairs: set[tuple[str, str]] = set()
+    floor_bodies: set[str] = set()
+    self_contact_count = 0
+    floor_contact_count = 0
+    for idx in range(int(data.ncon)):
+        contact = data.contact[idx]
+        body1 = int(model.geom_bodyid[contact.geom1])
+        body2 = int(model.geom_bodyid[contact.geom2])
+        if body1 == body2:
+            continue
+        name1 = str(model.body(body1).name)
+        name2 = str(model.body(body2).name)
+        if body1 == 0 or body2 == 0:
+            floor_contact_count += 1
+            floor_bodies.add(name2 if body1 == 0 else name1)
+            continue
+        self_contact_count += 1
+        self_pairs.add(tuple(sorted((name1, name2))))
+    floor_contact_bodies = sorted(body for body in floor_bodies if body and body != "world")
+    self_contact_pairs = [" <-> ".join(pair) for pair in sorted(self_pairs)]
+    return {
+        "has_floor_contact": bool(floor_contact_count > 0),
+        "floor_contact_count": floor_contact_count,
+        "floor_contact_bodies": floor_contact_bodies,
+        "floor_contact_body_count": len(floor_contact_bodies),
+        "has_self_contact": bool(self_contact_count > 0),
+        "self_contact_count": self_contact_count,
+        "self_contact_pairs": self_contact_pairs,
+        "self_contact_pair_count": len(self_contact_pairs),
+    }
+
+
+def write_trajectory_npz(path: Path, time_s: Any, qpos: Any, qvel: Any, root_z: Any) -> None:
+    rt = runtime()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rt.np.savez_compressed(
+        path,
+        time_s=rt.np.asarray(time_s, dtype=rt.np.float32),
+        qpos=rt.np.asarray(qpos, dtype=rt.np.float32),
+        qvel=rt.np.asarray(qvel, dtype=rt.np.float32),
+        root_z=rt.np.asarray(root_z, dtype=rt.np.float32),
+    )
+
+
+def settle_passively(
+    rt: SimpleNamespace,
+    model: Any,
+    data: Any,
+    settle_steps: int,
+    pelvis_body_id: int | None = None,
+) -> tuple[bool, dict[str, Any] | None]:
     data.ctrl[:] = 0.0
+    qpos_log = [data.qpos.copy()]
+    qvel_log = [data.qvel.copy()]
+    root_z_log = [float(data.xpos[pelvis_body_id, 2])] if pelvis_body_id is not None else []
     for _ in range(settle_steps):
         rt.mujoco.mj_step(model, data)
         if not rt.np.all(rt.np.isfinite(data.qpos)) or not rt.np.all(rt.np.isfinite(data.qvel)):
-            return False
-    return True
+            return False, None
+        qpos_log.append(data.qpos.copy())
+        qvel_log.append(data.qvel.copy())
+        if pelvis_body_id is not None:
+            root_z_log.append(float(data.xpos[pelvis_body_id, 2]))
+    trajectory = None
+    if pelvis_body_id is not None:
+        sim_dt = float(model.opt.timestep)
+        trajectory = {
+            "time_s": rt.np.arange(len(qpos_log), dtype=rt.np.float32) * sim_dt,
+            "qpos": rt.np.asarray(qpos_log, dtype=rt.np.float32),
+            "qvel": rt.np.asarray(qvel_log, dtype=rt.np.float32),
+            "root_z": rt.np.asarray(root_z_log, dtype=rt.np.float32),
+        }
+    return True, trajectory
+
+
+def settle_until_stable(
+    rt: SimpleNamespace,
+    model: Any,
+    data: Any,
+    pelvis_body_id: int,
+    joint_qvel_ids: Any,
+    timeout_s: float,
+    stable_dwell_s: float,
+    stable_root_speed_mps: float,
+    stable_ang_speed_rps: float,
+    stable_joint_speed_rms: float,
+    stable_root_span_m: float,
+) -> tuple[bool, dict[str, Any] | None, dict[str, float] | None]:
+    sim_dt = float(model.opt.timestep)
+    max_steps = max(1, int(math.ceil(timeout_s / sim_dt)))
+    dwell_steps = max(1, int(round(stable_dwell_s / sim_dt)))
+    history: deque[dict[str, Any]] = deque(maxlen=dwell_steps)
+    qpos_log = [data.qpos.copy()]
+    qvel_log = [data.qvel.copy()]
+    root_z_log = [float(data.xpos[pelvis_body_id, 2])]
+    history.append(stability_sample(rt, data, pelvis_body_id, joint_qvel_ids))
+    data.ctrl[:] = 0.0
+    for _ in range(max_steps):
+        rt.mujoco.mj_step(model, data)
+        if not rt.np.all(rt.np.isfinite(data.qpos)) or not rt.np.all(rt.np.isfinite(data.qvel)):
+            return False, None, None
+        qpos_log.append(data.qpos.copy())
+        qvel_log.append(data.qvel.copy())
+        root_z_log.append(float(data.xpos[pelvis_body_id, 2]))
+        history.append(stability_sample(rt, data, pelvis_body_id, joint_qvel_ids))
+        if len(history) == dwell_steps and history_is_stable(
+            rt,
+            history,
+            stable_root_speed_mps,
+            stable_ang_speed_rps,
+            stable_joint_speed_rms,
+            stable_root_span_m,
+        ):
+            trajectory = {
+                "time_s": rt.np.arange(len(qpos_log), dtype=rt.np.float32) * sim_dt,
+                "qpos": rt.np.asarray(qpos_log, dtype=rt.np.float32),
+                "qvel": rt.np.asarray(qvel_log, dtype=rt.np.float32),
+                "root_z": rt.np.asarray(root_z_log, dtype=rt.np.float32),
+            }
+            return True, trajectory, speed_summary(rt, model, data, pelvis_body_id, joint_qvel_ids)
+    trajectory = {
+        "time_s": rt.np.arange(len(qpos_log), dtype=rt.np.float32) * sim_dt,
+        "qpos": rt.np.asarray(qpos_log, dtype=rt.np.float32),
+        "qvel": rt.np.asarray(qvel_log, dtype=rt.np.float32),
+        "root_z": rt.np.asarray(root_z_log, dtype=rt.np.float32),
+    }
+    return False, trajectory, speed_summary(rt, model, data, pelvis_body_id, joint_qvel_ids)
 
 
 def sample_fallen_state(
@@ -530,14 +722,26 @@ def sample_fallen_state(
     joint_upper: Any,
     pelvis_body_id: int,
     fallen_z: float,
-    settle_steps: int,
     max_attempts: int,
-) -> tuple[Any, Any, float, int]:
+    settle_timeout_s: float,
+    stable_dwell_s: float,
+    stable_root_speed_mps: float,
+    stable_ang_speed_rps: float,
+    stable_joint_speed_rms: float,
+    stable_root_span_m: float,
+) -> dict[str, Any]:
     joint_span = joint_upper - joint_lower
+    rejection_counts = {
+        "raw_floor_contact": 0,
+        "raw_self_contact": 0,
+        "settle_invalid": 0,
+        "not_fallen_after_settle": 0,
+        "settle_timeout": 0,
+    }
     for attempt in range(1, max_attempts + 1):
         rt.mujoco.mj_resetData(model, data)
         data.qpos[0:2] = rng.uniform(-0.15, 0.15, size=2)
-        data.qpos[2] = rng.uniform(0.15, 0.4)
+        data.qpos[2] = rng.uniform(0.55, 0.9)
         data.qpos[3:7] = euler_xyz_to_wxyz(
             rt,
             float(rng.uniform(-math.pi, math.pi)),
@@ -550,11 +754,46 @@ def sample_fallen_state(
         data.qvel[3:6] = rng.normal(0.0, 0.2, size=3)
         data.qvel[joint_qvel_ids] = rng.normal(0.0, rt.np.maximum(0.1, 0.05 * joint_span), size=joint_qvel_ids.shape[0])
         rt.mujoco.mj_forward(model, data)
-        if not settle_passively(rt, model, data, settle_steps):
+        raw_contact = contact_summary_for_current_state(rt, model, data)
+        if raw_contact["has_floor_contact"]:
+            rejection_counts["raw_floor_contact"] += 1
+            continue
+        if raw_contact["has_self_contact"]:
+            rejection_counts["raw_self_contact"] += 1
+            continue
+        settled_ok, settle_trajectory, settled_speed = settle_until_stable(
+            rt,
+            model,
+            data,
+            pelvis_body_id,
+            joint_qvel_ids,
+            settle_timeout_s,
+            stable_dwell_s,
+            stable_root_speed_mps,
+            stable_ang_speed_rps,
+            stable_joint_speed_rms,
+            stable_root_span_m,
+        )
+        if settle_trajectory is None:
+            rejection_counts["settle_invalid"] += 1
+            continue
+        if not settled_ok or settled_speed is None:
+            rejection_counts["settle_timeout"] += 1
             continue
         root_z = float(data.xpos[pelvis_body_id, 2])
-        if root_z < fallen_z:
-            return data.qpos.copy(), data.qvel.copy(), root_z, attempt
+        if root_z >= fallen_z:
+            rejection_counts["not_fallen_after_settle"] += 1
+            continue
+        return {
+            "qpos": data.qpos.copy(),
+            "qvel": data.qvel.copy(),
+            "root_z_m": root_z,
+            "sample_attempts": attempt,
+            "raw_contact": raw_contact,
+            "settled_speed": settled_speed,
+            "settle_trajectory": settle_trajectory,
+            "rejection_counts": rejection_counts,
+        }
     raise RuntimeError(f"Failed to sample a fallen state after {max_attempts} attempts")
 
 
@@ -566,8 +805,9 @@ def motion_frame_to_state(
     frame_idx: int,
     joint_qpos_ids: Any,
     joint_qvel_ids: Any,
+    pelvis_body_id: int,
     settle_steps: int,
-) -> tuple[Any, Any]:
+) -> tuple[Any, Any, dict[str, Any], dict[str, Any] | None]:
     motion_data = rt.joblib.load(BFM_ZERO_TRAIN_ROOT / "humanoidverse" / "data" / "lafan_29dof.pkl")
     if motion_key not in motion_data:
         raise KeyError(f"Motion {motion_key} missing from lafan_29dof.pkl")
@@ -585,9 +825,10 @@ def motion_frame_to_state(
         if len(joint_qvel_ids) > 0:
             data.qvel[joint_qvel_ids] = (entry["dof"][frame_idx + 1] - entry["dof"][frame_idx - 1]) / (2.0 * dt)
     rt.mujoco.mj_forward(model, data)
-    settle_passively(rt, model, data, settle_steps)
+    raw_contact = contact_summary_for_current_state(rt, model, data)
+    _, settle_trajectory = settle_passively(rt, model, data, settle_steps, pelvis_body_id)
     rt.mujoco.mj_forward(model, data)
-    return data.qpos.copy(), data.qvel.copy()
+    return data.qpos.copy(), data.qvel.copy(), raw_contact, settle_trajectory
 
 
 def load_target_body_positions(
@@ -600,7 +841,18 @@ def load_target_body_positions(
     extend_parent_body_id: int,
 ) -> Any:
     motion_key, frame_idx = parse_goal_key(goal_key)
-    qpos, _ = motion_frame_to_state(rt, model, data, motion_key, frame_idx, joint_qpos_ids, rt.np.asarray([], dtype=rt.np.int64), 0)
+    pelvis_body_id = model.body("pelvis").id
+    qpos, _, _, _ = motion_frame_to_state(
+        rt,
+        model,
+        data,
+        motion_key,
+        frame_idx,
+        joint_qpos_ids,
+        rt.np.asarray([], dtype=rt.np.int64),
+        pelvis_body_id,
+        0,
+    )
     data.qpos[:] = qpos
     data.qvel[:] = 0.0
     rt.mujoco.mj_forward(model, data)
@@ -630,6 +882,8 @@ def render_frame(rt: SimpleNamespace, renderer: Any, camera: Any, model: Any, da
 
 
 def write_plot(rt: SimpleNamespace, curves: Any, time_s: Any, title: str, ylabel: str, output_path: Path) -> None:
+    if rt.plt is None:
+        raise ModuleNotFoundError("matplotlib is required for stage3 plot generation")
     fig, ax = rt.plt.subplots(figsize=(12, 6))
     for curve in curves:
         ax.plot(time_s, curve, color="#1f77b4", alpha=0.12, linewidth=1.0)
@@ -644,6 +898,8 @@ def write_plot(rt: SimpleNamespace, curves: Any, time_s: Any, title: str, ylabel
 
 
 def tile_video(rt: SimpleNamespace, frames: Any, fps: int, output_path: Path) -> tuple[int, int, int, int]:
+    if rt.imageio is None:
+        raise ModuleNotFoundError("imageio is required for video export")
     num_runs, frame_count, tile_height, tile_width, _ = frames.shape
     grid_cols = math.ceil(math.sqrt(num_runs))
     grid_rows = math.ceil(num_runs / grid_cols)
@@ -690,6 +946,10 @@ def sim_runner_cmd(mode: str, extra_args: list[str]) -> list[str]:
 
 def stage1_manifest_path(stage1_dir: Path) -> Path:
     return stage1_dir / "initial_states_manifest.json"
+
+
+def stage1_summary_path(stage1_dir: Path) -> Path:
+    return stage1_dir / "summary.json"
 
 
 def stage2_summary_path(stage2_dir: Path) -> Path:
@@ -810,10 +1070,20 @@ def try_direct_goal_state(
     goal_key: str,
     fallen_z: float,
     settle_steps: int,
-) -> tuple[Any, Any, float, str] | None:
+) -> tuple[Any, Any, float, str, dict[str, Any], dict[str, Any] | None] | None:
     motion_key, frame_idx = parse_goal_key(goal_key)
     try:
-        qpos, qvel = motion_frame_to_state(rt, model, data, motion_key, frame_idx, joint_qpos_ids, joint_qvel_ids, settle_steps)
+        qpos, qvel, raw_contact, settle_trajectory = motion_frame_to_state(
+            rt,
+            model,
+            data,
+            motion_key,
+            frame_idx,
+            joint_qpos_ids,
+            joint_qvel_ids,
+            pelvis_body_id,
+            settle_steps,
+        )
     except Exception as exc:
         return None if isinstance(exc, Exception) else None
     data.qpos[:] = qpos
@@ -822,72 +1092,7 @@ def try_direct_goal_state(
     root_z = float(data.xpos[pelvis_body_id, 2])
     if root_z >= fallen_z:
         return None
-    return qpos, qvel, root_z, "lafan_29dof frame extraction + passive settle"
-
-
-def capture_goal_state_via_process(
-    goal_key: str,
-    run_dir: Path,
-    fallen_z: float,
-    settle_dwell_s: float,
-    stable_root_speed_mps: float,
-    stable_ang_speed_rps: float,
-    stable_joint_speed_rms: float,
-    stable_root_span_m: float,
-    timeout_s: float,
-    low_state_port: int,
-    low_cmd_port: int,
-) -> tuple[Any, Any, float, str]:
-    ready_file = run_dir / "sim_ready.json"
-    start_flag = run_dir / "capture_start.flag"
-    snapshot_path = run_dir / "captured_goal_state.npz"
-    summary_path = run_dir / "captured_goal_state_summary.json"
-    robot_config_path, scene_config_path = write_runtime_configs(run_dir, low_state_port, low_cmd_port, True)
-    sim = launch_sim_capture(
-        run_dir,
-        "capture-fallen",
-        robot_config_path,
-        scene_config_path,
-        [
-            "--ready-file",
-            str(ready_file),
-            "--start-flag",
-            str(start_flag),
-            "--snapshot-path",
-            str(snapshot_path),
-            "--summary-path",
-            str(summary_path),
-            "--fallen-z",
-            f"{fallen_z:.6f}",
-            "--stable-dwell-s",
-            f"{settle_dwell_s:.6f}",
-            "--stable-root-speed-mps",
-            f"{stable_root_speed_mps:.6f}",
-            "--stable-ang-speed-rps",
-            f"{stable_ang_speed_rps:.6f}",
-            "--stable-joint-speed-rms",
-            f"{stable_joint_speed_rms:.6f}",
-            "--stable-root-span-m",
-            f"{stable_root_span_m:.6f}",
-            "--timeout-s",
-            f"{timeout_s:.6f}",
-        ],
-    )
-    deployer: ManagedProcess | None = None
-    try:
-        wait_for_path(ready_file, 10.0, "simulator ready file")
-        deployer = launch_deployer(run_dir, robot_config_path, 30.0)
-        advance_policy_to_goal(deployer, goal_key, 10.0)
-        touch(start_flag)
-        deployer.send("]")
-        deployer.wait_for_marker(f"Switch to goal={goal_key}", 10.0)
-        wait_for_path(snapshot_path, timeout_s + 10.0, f"captured goal state for {goal_key}")
-        qpos, qvel, root_z = load_stage_state_npz(snapshot_path)
-        return qpos, qvel, root_z, "policy rollout capture"
-    finally:
-        if deployer is not None:
-            deployer.terminate()
-        sim.terminate()
+    return qpos, qvel, root_z, "lafan_29dof frame extraction + passive settle", raw_contact, settle_trajectory
 
 
 def stage1(args: argparse.Namespace) -> int:
@@ -895,7 +1100,9 @@ def stage1(args: argparse.Namespace) -> int:
     layout = build_layout(args.run_id or f"{now_stamp()}_stage1_seed{args.seed}")
     stage1_dir = layout.stage1_dir
     states_dir = stage1_dir / "states"
+    settle_logs_dir = stage1_dir / "settle_trajectories"
     states_dir.mkdir(parents=True, exist_ok=True)
+    settle_logs_dir.mkdir(parents=True, exist_ok=True)
 
     model = rt.mujoco.MjModel.from_xml_path(str(BFM_ZERO_DEPLOY_ROOT / "data" / "robots" / "g1" / "scene_29dof_freebase.xml"))
     data = rt.mujoco.MjData(model)
@@ -910,9 +1117,16 @@ def stage1(args: argparse.Namespace) -> int:
 
     direct_extraction: dict[str, dict[str, Any]] = {}
     manifest_states: list[dict[str, Any]] = []
+    rejection_counts = {
+        "raw_floor_contact": 0,
+        "raw_self_contact": 0,
+        "settle_invalid": 0,
+        "not_fallen_after_settle": 0,
+        "settle_timeout": 0,
+    }
 
     for random_index in range(args.random_count):
-        qpos, qvel, root_z, attempts = sample_fallen_state(
+        sample = sample_fallen_state(
             rt,
             model,
             data,
@@ -923,25 +1137,48 @@ def stage1(args: argparse.Namespace) -> int:
             joint_upper,
             pelvis_body_id,
             args.fallen_z,
-            args.settle_steps,
             args.max_sample_attempts,
+            args.capture_timeout_s,
+            args.stable_dwell_s,
+            args.stable_root_speed_mps,
+            args.stable_ang_speed_rps,
+            args.stable_joint_speed_rms,
+            args.stable_root_span_m,
         )
+        for key, value in sample["rejection_counts"].items():
+            rejection_counts[key] += int(value)
         state_id = f"state_{len(manifest_states):03d}"
         state_path = states_dir / f"{state_id}.npz"
-        write_stage_state_npz(state_path, qpos, qvel, root_z)
+        settle_log_path = settle_logs_dir / f"{state_id}.npz"
+        write_stage_state_npz(state_path, sample["qpos"], sample["qvel"], sample["root_z_m"])
+        write_trajectory_npz(
+            settle_log_path,
+            sample["settle_trajectory"]["time_s"],
+            sample["settle_trajectory"]["qpos"],
+            sample["settle_trajectory"]["qvel"],
+            sample["settle_trajectory"]["root_z"],
+        )
         manifest_states.append(
             {
                 "state_id": state_id,
                 "index": len(manifest_states),
                 "source": "random",
                 "goal_key": None,
-                "root_z_m": root_z,
+                "root_z_m": sample["root_z_m"],
                 "seed": args.seed,
-                "sample_attempts": attempts,
+                "sample_attempts": sample["sample_attempts"],
                 "state_path": repo_rel(state_path),
+                "settle_trajectory_path": repo_rel(settle_log_path),
+                "raw_contact": sample["raw_contact"],
+                "settled_speed": sample["settled_speed"],
                 "acceptance": {
                     "fallen_z_threshold_m": args.fallen_z,
-                    "settle_steps": args.settle_steps,
+                    "settle_timeout_s": args.capture_timeout_s,
+                    "stable_dwell_s": args.stable_dwell_s,
+                    "stable_root_speed_mps": args.stable_root_speed_mps,
+                    "stable_ang_speed_rps": args.stable_ang_speed_rps,
+                    "stable_joint_speed_rms": args.stable_joint_speed_rms,
+                    "stable_root_span_m": args.stable_root_span_m,
                     "max_sample_attempts": args.max_sample_attempts,
                 },
             }
@@ -959,29 +1196,29 @@ def stage1(args: argparse.Namespace) -> int:
             args.fallen_z,
             args.settle_steps,
         )
-        if direct is not None:
-            qpos, qvel, root_z, reason = direct
-            direct_extraction[goal_key] = {"supported": True, "reason": reason}
-        else:
-            direct_extraction[goal_key] = {"supported": False, "reason": "direct frame extraction did not yield a fallen settled state"}
-            qpos, qvel, root_z, reason = capture_goal_state_via_process(
-                goal_key=goal_key,
-                run_dir=stage1_dir / f"goal_capture_{goal_offset:02d}_{goal_key}",
-                fallen_z=args.fallen_z,
-                settle_dwell_s=args.stable_dwell_s,
-                stable_root_speed_mps=args.stable_root_speed_mps,
-                stable_ang_speed_rps=args.stable_ang_speed_rps,
-                stable_joint_speed_rms=args.stable_joint_speed_rms,
-                stable_root_span_m=args.stable_root_span_m,
-                timeout_s=args.capture_timeout_s,
-                low_state_port=args.port_base + goal_offset * 2,
-                low_cmd_port=args.port_base + goal_offset * 2 + 1,
+        if direct is None:
+            raise RuntimeError(f"Goal-derived state for {goal_key} could not be reproduced by direct frame extraction")
+        qpos, qvel, root_z, reason, raw_contact, settle_trajectory = direct
+        direct_extraction[goal_key] = {"supported": True, "reason": reason}
+        trajectory_path = settle_logs_dir / f"goal_{goal_offset:02d}_{goal_key}.npz"
+        if settle_trajectory is not None:
+            write_trajectory_npz(
+                trajectory_path,
+                settle_trajectory["time_s"],
+                settle_trajectory["qpos"],
+                settle_trajectory["qvel"],
+                settle_trajectory["root_z"],
             )
         if root_z >= args.fallen_z:
             raise RuntimeError(f"Goal-derived state for {goal_key} has root_z={root_z:.4f} >= fallen threshold {args.fallen_z:.4f}")
+        data.qpos[:] = qpos
+        data.qvel[:] = qvel
+        settled_speed = speed_summary(rt, model, data, pelvis_body_id, joint_qvel_ids)
         state_id = f"state_{len(manifest_states):03d}"
         state_path = states_dir / f"{state_id}.npz"
         write_stage_state_npz(state_path, qpos, qvel, root_z)
+        final_settle_log_path = settle_logs_dir / f"{state_id}.npz"
+        trajectory_path.replace(final_settle_log_path)
         manifest_states.append(
             {
                 "state_id": state_id,
@@ -992,6 +1229,9 @@ def stage1(args: argparse.Namespace) -> int:
                 "seed": args.seed,
                 "sample_attempts": None,
                 "state_path": repo_rel(state_path),
+                "settle_trajectory_path": repo_rel(final_settle_log_path),
+                "raw_contact": raw_contact,
+                "settled_speed": settled_speed,
                 "acceptance": {
                     "fallen_z_threshold_m": args.fallen_z,
                     "capture_reason": reason,
@@ -1015,12 +1255,52 @@ def stage1(args: argparse.Namespace) -> int:
         "fallen_z_threshold_m": args.fallen_z,
         "goal_keys": list(args.goal_keys),
         "direct_extraction": direct_extraction,
+        "stability_thresholds": {
+            "stable_dwell_s": args.stable_dwell_s,
+            "stable_root_speed_mps": args.stable_root_speed_mps,
+            "stable_ang_speed_rps": args.stable_ang_speed_rps,
+            "stable_joint_speed_rms": args.stable_joint_speed_rms,
+            "stable_root_span_m": args.stable_root_span_m,
+        },
+        "rejection_counts": rejection_counts,
         "states_dir": repo_rel(states_dir),
+        "settle_trajectories_dir": repo_rel(settle_logs_dir),
         "states": manifest_states,
     }
     manifest_path = stage1_manifest_path(stage1_dir)
     write_json(manifest_path, manifest)
-    print(json.dumps({"stage1_manifest": repo_rel(manifest_path), "state_count": len(manifest_states)}, indent=2))
+    stage1_summary = {
+        "run_id": layout.run_id,
+        "created_at": now_iso(),
+        "stage": "stage1",
+        "stage1_manifest": repo_rel(manifest_path),
+        "state_count": len(manifest_states),
+        "random_count": args.random_count,
+        "goal_derived_count": len(args.goal_keys),
+        "fallen_z_threshold_m": args.fallen_z,
+        "stability_thresholds": manifest["stability_thresholds"],
+        "rejection_counts": rejection_counts,
+        "states": [
+            {
+                "state_id": row["state_id"],
+                "source": row["source"],
+                "state_path": row["state_path"],
+                "settle_trajectory_path": row["settle_trajectory_path"],
+            }
+            for row in manifest_states
+        ],
+    }
+    write_json(stage1_summary_path(stage1_dir), stage1_summary)
+    print(
+        json.dumps(
+            {
+                "stage1_manifest": repo_rel(manifest_path),
+                "stage1_summary": repo_rel(stage1_summary_path(stage1_dir)),
+                "state_count": len(manifest_states),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -1156,6 +1436,7 @@ def stage3(args: argparse.Namespace) -> int:
     run_id = str(summary["run_id"])
     layout = build_layout(run_id)
     stage3_dir = layout.stage3_dir
+    stage1_manifest = load_json(REPO_ROOT / str(summary["stage1_manifest"]))
 
     run_summary_paths = [REPO_ROOT / str(path) for path in summary["run_summaries"]]
     run_summaries = [load_json(path) for path in run_summary_paths]
@@ -1227,26 +1508,74 @@ def stage3(args: argparse.Namespace) -> int:
     write_plot(rt, latent_cosine, time_s, f"BFM-Zero Fallen-Recovery Latent Cosine ({title_suffix})", "Cosine Similarity", latent_plot)
     write_plot(rt, root_z, time_s, f"BFM-Zero Fallen-Recovery Base Height ({title_suffix})", "Pelvis Height (m)", root_z_plot)
 
-    render_times = rt.np.arange(0.0, float(summary["horizon_s"]) + 1e-9, 1.0 / args.video_fps, dtype=rt.np.float32)
-    render_indices = rt.np.clip(rt.np.searchsorted(time_s, render_times, side="left"), 0, len(time_s) - 1)
-    renderer, camera = build_renderer(rt, model, args.render_width, args.render_height, pelvis_body_id)
-    frames = rt.np.zeros((num_runs, len(render_indices), args.render_height, args.render_width, 3), dtype=rt.np.uint8)
-    for run_idx, run_summary in enumerate(run_summaries):
-        traj = rt.np.load(REPO_ROOT / str(run_summary["trajectory_path"]))
-        qpos = rt.np.asarray(traj["qpos"], dtype=rt.np.float32)
-        for frame_idx, sample_idx in enumerate(render_indices):
-            frames[run_idx, frame_idx] = render_frame(rt, renderer, camera, model, data, qpos[int(sample_idx)])
-    renderer.close()
     tiled_video = stage3_dir / "tiled_runs.mp4"
-    grid_rows, grid_cols, video_width, video_height = tile_video(rt, frames, args.video_fps, tiled_video)
+    grid_rows, grid_cols, video_width, video_height = render_tiled_video_from_paths(
+        rt,
+        model,
+        data,
+        pelvis_body_id,
+        [REPO_ROOT / str(row["trajectory_path"]) for row in run_summaries],
+        args.video_fps,
+        args.render_width,
+        args.render_height,
+        tiled_video,
+    )
+    stage1_tiled_video = stage3_dir / "tiled_stage1_settle.mp4"
+    stage1_grid_rows, stage1_grid_cols, stage1_video_width, stage1_video_height = render_tiled_video_from_paths(
+        rt,
+        model,
+        data,
+        pelvis_body_id,
+        [REPO_ROOT / str(row["settle_trajectory_path"]) for row in stage1_manifest["states"]],
+        args.video_fps,
+        args.render_width,
+        args.render_height,
+        stage1_tiled_video,
+    )
 
     latent_min = float(rt.np.nanmin(latent_cosine))
     latent_max = float(rt.np.nanmax(latent_cosine))
+    failed_runs = [row for row in run_summaries if not bool(row["success"])]
+    failed_recovery_index = None
+    failed_recovery_videos: list[str] = []
+    failed_settle_index = None
+    failed_settle_videos: list[str] = []
+    if failed_runs:
+        failed_recovery_index, failed_recovery_videos = render_failed_video_group(
+            rt,
+            model,
+            data,
+            pelvis_body_id,
+            failed_runs,
+            lambda run_summary: REPO_ROOT / str(run_summary["trajectory_path"]),
+            args.video_fps,
+            args.failed_render_width,
+            args.failed_render_height,
+            layout.stage3_dir,
+            "failed_videos_index.json",
+            lambda run_name, state_id: f"{run_name}_{state_id}_1080p.mp4",
+        )
+        failed_settle_index, failed_settle_videos = render_failed_video_group(
+            rt,
+            model,
+            data,
+            pelvis_body_id,
+            failed_runs,
+            lambda run_summary: REPO_ROOT / str(run_summary["source_state"]["settle_trajectory_path"]),
+            args.video_fps,
+            args.failed_render_width,
+            args.failed_render_height,
+            layout.stage3_dir,
+            "failed_settle_videos_index.json",
+            lambda run_name, state_id: f"{run_name}_{state_id}_settle_1080p.mp4",
+        )
     summary_payload = {
         "run_id": run_id,
         "created_at": now_iso(),
         "stage": "stage3",
         "stage2_summary": repo_rel(stage2_summary_path(stage2_dir)),
+        "stage1_manifest": repo_rel(REPO_ROOT / str(summary["stage1_manifest"])),
+        "stage1_summary": repo_rel(stage1_summary_path((REPO_ROOT / str(summary["stage1_manifest"])).parent)),
         "num_runs": num_runs,
         "goal_key": summary["goal_key"],
         "seed": manifest_seed_from_stage2(summary),
@@ -1259,12 +1588,17 @@ def stage3(args: argparse.Namespace) -> int:
         "video_grid_cols": grid_cols,
         "video_width": video_width,
         "video_height": video_height,
+        "stage1_video_grid_rows": stage1_grid_rows,
+        "stage1_video_grid_cols": stage1_grid_cols,
+        "stage1_video_width": stage1_video_width,
+        "stage1_video_height": stage1_video_height,
         "sanity": {
             "mpjpe_finite": bool(rt.np.all(rt.np.isfinite(mpjpe_mm))),
             "latent_cosine_finite": bool(rt.np.all(rt.np.isfinite(latent_cosine))),
             "latent_cosine_in_range": bool(latent_min >= -1.0001 and latent_max <= 1.0001),
             "root_z_finite": bool(rt.np.all(rt.np.isfinite(root_z))),
             "full_grid_1920x1080": bool(num_runs == 100 and video_width == 1920 and video_height == 1080),
+            "full_stage1_grid_1920x1080": bool(num_runs == 100 and stage1_video_width == 1920 and stage1_video_height == 1080),
         },
         "artifacts": {
             "metrics_npz": repo_rel(metrics_path),
@@ -1273,10 +1607,26 @@ def stage3(args: argparse.Namespace) -> int:
             "latent_plot": repo_rel(latent_plot),
             "base_height_plot": repo_rel(root_z_plot),
             "tiled_video": repo_rel(tiled_video),
+            "stage1_tiled_settle_video": repo_rel(stage1_tiled_video),
         },
     }
+    if failed_recovery_index is not None:
+        summary_payload["artifacts"]["failed_videos_index"] = repo_rel(failed_recovery_index)
+        summary_payload["artifacts"]["failed_videos_1080p"] = failed_recovery_videos
+    if failed_settle_index is not None:
+        summary_payload["artifacts"]["failed_settle_videos_index"] = repo_rel(failed_settle_index)
+        summary_payload["artifacts"]["failed_settle_videos_1080p"] = failed_settle_videos
     write_json(stage3_summary_path(stage3_dir), summary_payload)
-    print(json.dumps({"stage3_summary": repo_rel(stage3_summary_path(stage3_dir)), "video": repo_rel(tiled_video)}, indent=2))
+    print(
+        json.dumps(
+            {
+                "stage3_summary": repo_rel(stage3_summary_path(stage3_dir)),
+                "video": repo_rel(tiled_video),
+                "stage1_video": repo_rel(stage1_tiled_video),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -1377,32 +1727,7 @@ def classify_root_orientation(rt: SimpleNamespace, quat_wxyz: Any) -> str:
 
 
 def contact_features_for_state(rt: SimpleNamespace, model: Any, data: Any) -> dict[str, Any]:
-    self_pairs: set[tuple[str, str]] = set()
-    floor_bodies: set[str] = set()
-    self_contact_count = 0
-    floor_contact_count = 0
-    for idx in range(int(data.ncon)):
-        contact = data.contact[idx]
-        body1 = int(model.geom_bodyid[contact.geom1])
-        body2 = int(model.geom_bodyid[contact.geom2])
-        if body1 == body2:
-            continue
-        name1 = str(model.body(body1).name)
-        name2 = str(model.body(body2).name)
-        if body1 == 0 or body2 == 0:
-            floor_contact_count += 1
-            floor_bodies.add(name2 if body1 == 0 else name1)
-            continue
-        self_contact_count += 1
-        self_pairs.add(tuple(sorted((name1, name2))))
-    return {
-        "self_contact_count": self_contact_count,
-        "self_contact_pairs": [" <-> ".join(pair) for pair in sorted(self_pairs)],
-        "self_contact_pair_count": len(self_pairs),
-        "floor_contact_count": floor_contact_count,
-        "floor_contact_bodies": sorted(body for body in floor_bodies if body and body != "world"),
-        "floor_contact_body_count": len([body for body in floor_bodies if body and body != "world"]),
-    }
+    return contact_summary_for_current_state(rt, model, data)
 
 
 def safe_mean(values: list[float]) -> float:
@@ -1450,6 +1775,8 @@ def render_video_from_qpos(
     fps: int,
     output_path: Path,
 ) -> None:
+    if rt.imageio is None:
+        raise ModuleNotFoundError("imageio is required for video export")
     writer = rt.imageio.get_writer(output_path, fps=fps, codec="libx264", macro_block_size=None)
     try:
         for sample_idx in sample_indices:
@@ -1457,6 +1784,81 @@ def render_video_from_qpos(
             writer.append_data(frame)
     finally:
         writer.close()
+
+
+def render_tiled_video_from_paths(
+    rt: SimpleNamespace,
+    model: Any,
+    data: Any,
+    pelvis_body_id: int,
+    trajectory_paths: list[Path],
+    fps: int,
+    render_width: int,
+    render_height: int,
+    output_path: Path,
+) -> tuple[int, int, int, int]:
+    trajectories = [rt.np.load(path) for path in trajectory_paths]
+    if not trajectories:
+        raise ValueError("No trajectories were provided for tiled rendering")
+    max_duration_s = max(float(rt.np.asarray(traj["time_s"], dtype=rt.np.float32)[-1]) for traj in trajectories)
+    render_times = rt.np.arange(0.0, max_duration_s + 1e-9, 1.0 / fps, dtype=rt.np.float32)
+    renderer, camera = build_renderer(rt, model, render_width, render_height, pelvis_body_id)
+    frames = rt.np.zeros((len(trajectories), len(render_times), render_height, render_width, 3), dtype=rt.np.uint8)
+    try:
+        for run_idx, traj in enumerate(trajectories):
+            time_s = rt.np.asarray(traj["time_s"], dtype=rt.np.float32)
+            qpos = rt.np.asarray(traj["qpos"], dtype=rt.np.float32)
+            sample_indices = rt.np.clip(rt.np.searchsorted(time_s, render_times, side="left"), 0, len(time_s) - 1)
+            for frame_idx, sample_idx in enumerate(sample_indices):
+                frames[run_idx, frame_idx] = render_frame(rt, renderer, camera, model, data, qpos[int(sample_idx)])
+    finally:
+        renderer.close()
+    return tile_video(rt, frames, fps, output_path)
+
+
+def render_failed_video_group(
+    rt: SimpleNamespace,
+    model: Any,
+    data: Any,
+    pelvis_body_id: int,
+    failed_runs: list[dict[str, Any]],
+    trajectory_path_for_run: Any,
+    fps: int,
+    render_width: int,
+    render_height: int,
+    output_dir: Path,
+    index_name: str,
+    file_name_builder: Any,
+) -> tuple[Path, list[str]]:
+    renderer, camera = build_renderer(rt, model, render_width, render_height, pelvis_body_id)
+    output_paths: list[str] = []
+    try:
+        for run_summary in failed_runs:
+            run_name = Path(str(run_summary["summary_path"])).parent.name
+            state_id = str(run_summary["source_state"]["state_id"])
+            output_path = output_dir / str(file_name_builder(run_name, state_id))
+            traj = rt.np.load(trajectory_path_for_run(run_summary))
+            time_s = rt.np.asarray(traj["time_s"], dtype=rt.np.float32)
+            qpos = rt.np.asarray(traj["qpos"], dtype=rt.np.float32)
+            render_times = rt.np.arange(0.0, float(time_s[-1]) + 1e-9, 1.0 / fps, dtype=rt.np.float32)
+            render_indices = rt.np.clip(rt.np.searchsorted(time_s, render_times, side="left"), 0, len(time_s) - 1)
+            render_video_from_qpos(rt, model, data, renderer, camera, qpos, render_indices, fps, output_path)
+            output_paths.append(repo_rel(output_path))
+    finally:
+        renderer.close()
+
+    index_path = output_dir / index_name
+    write_json(
+        index_path,
+        {
+            "created_at": now_iso(),
+            "video_fps": fps,
+            "render_width": render_width,
+            "render_height": render_height,
+            "failed_videos": output_paths,
+        },
+    )
+    return index_path, output_paths
 
 
 def render_failed_videos(args: argparse.Namespace) -> int:
@@ -1470,40 +1872,27 @@ def render_failed_videos(args: argparse.Namespace) -> int:
     ctx = build_model_context(rt)
     model = ctx["model"]
     data = ctx["data"]
-    renderer, camera = build_renderer(rt, model, args.render_width, args.render_height, int(ctx["pelvis_body_id"]))
-    first_traj = rt.np.load(REPO_ROOT / str(failed_runs[0]["trajectory_path"]))
-    time_s = rt.np.asarray(first_traj["time_s"], dtype=rt.np.float32)
-    render_times = rt.np.arange(0.0, float(summary["horizon_s"]) + 1e-9, 1.0 / args.video_fps, dtype=rt.np.float32)
-    render_indices = rt.np.clip(rt.np.searchsorted(time_s, render_times, side="left"), 0, len(time_s) - 1)
-
-    output_paths: list[str] = []
-    for run_summary in failed_runs:
-        run_name = Path(str(run_summary["summary_path"])).parent.name
-        state_id = str(run_summary["source_state"]["state_id"])
-        output_path = layout.stage3_dir / f"{run_name}_{state_id}_1080p.mp4"
-        traj = rt.np.load(REPO_ROOT / str(run_summary["trajectory_path"]))
-        qpos = rt.np.asarray(traj["qpos"], dtype=rt.np.float32)
-        render_video_from_qpos(rt, model, data, renderer, camera, qpos, render_indices, args.video_fps, output_path)
-        output_paths.append(repo_rel(output_path))
-    renderer.close()
-
-    index_path = layout.stage3_dir / "failed_videos_index.json"
-    write_json(
-        index_path,
-        {
-            "run_id": str(summary["run_id"]),
-            "created_at": now_iso(),
-            "video_fps": args.video_fps,
-            "render_width": args.render_width,
-            "render_height": args.render_height,
-            "failed_videos": output_paths,
-        },
+    index_path, output_paths = render_failed_video_group(
+        rt,
+        model,
+        data,
+        int(ctx["pelvis_body_id"]),
+        failed_runs,
+        lambda run_summary: REPO_ROOT / str(run_summary["trajectory_path"]),
+        args.video_fps,
+        args.render_width,
+        args.render_height,
+        layout.stage3_dir,
+        "failed_videos_index.json",
+        lambda run_name, state_id: f"{run_name}_{state_id}_1080p.mp4",
     )
-    stage3_summary = load_json(stage3_summary_path(layout.stage3_dir))
-    stage3_summary.setdefault("artifacts", {})
-    stage3_summary["artifacts"]["failed_videos_index"] = repo_rel(index_path)
-    stage3_summary["artifacts"]["failed_videos_1080p"] = output_paths
-    write_json(stage3_summary_path(layout.stage3_dir), stage3_summary)
+    summary_path = stage3_summary_path(layout.stage3_dir)
+    if summary_path.exists():
+        stage3_summary = load_json(summary_path)
+        stage3_summary.setdefault("artifacts", {})
+        stage3_summary["artifacts"]["failed_videos_index"] = repo_rel(index_path)
+        stage3_summary["artifacts"]["failed_videos_1080p"] = output_paths
+        write_json(summary_path, stage3_summary)
     print(json.dumps({"failed_video_count": len(output_paths), "failed_videos_index": repo_rel(index_path)}, indent=2))
     return 0
 
@@ -1750,9 +2139,13 @@ def analyze_failures(args: argparse.Namespace) -> int:
     if not report_path.is_absolute():
         report_path = REPO_ROOT / report_path
     failed_video_index = layout.stage3_dir / "failed_videos_index.json"
+    failed_settle_video_index = layout.stage3_dir / "failed_settle_videos_index.json"
     failed_video_paths = []
+    failed_settle_video_paths = []
     if failed_video_index.exists():
         failed_video_paths = list(load_json(failed_video_index).get("failed_videos", []))
+    if failed_settle_video_index.exists():
+        failed_settle_video_paths = list(load_json(failed_settle_video_index).get("failed_videos", []))
 
     top_scalar = scalar_rankings[:8]
     top_joints = joint_rankings[:8]
@@ -1788,10 +2181,16 @@ def analyze_failures(args: argparse.Namespace) -> int:
             "## Failed Video Exports",
             "",
             f"- Tiled video: `{repo_rel(layout.stage3_dir / 'tiled_runs.mp4')}`",
+            f"- Stage 1 tiled passive-settle video: `{repo_rel(layout.stage3_dir / 'tiled_stage1_settle.mp4')}`",
             f"- Failed-video index: `{repo_rel(failed_video_index) if failed_video_index.exists() else 'not generated yet'}`",
+            f"- Failed settle-video index: `{repo_rel(failed_settle_video_index) if failed_settle_video_index.exists() else 'not generated yet'}`",
+            "",
+            "Failed recovery videos:",
         ]
     )
     report_lines.extend([f"- `{path}`" for path in failed_video_paths] or ["- No failed-video exports were present when this report was generated."])
+    report_lines.extend(["", "Failed passive-settle videos:"])
+    report_lines.extend([f"- `{path}`" for path in failed_settle_video_paths] or ["- No failed settle-video exports were present when this report was generated."])
 
     report_lines.extend(
         [
@@ -1952,67 +2351,6 @@ def sim_runner(args: argparse.Namespace) -> int:
         data.ctrl[:] = sim_bridge.torques
         rt.mujoco.mj_step(model, data)
 
-    if args.mode == "capture-fallen":
-        if not args.snapshot_path or not args.summary_path:
-            raise ValueError("capture-fallen mode requires --snapshot-path and --summary-path")
-        dwell_steps = max(1, int(round(args.stable_dwell_s / sim_dt)))
-        history: deque[dict[str, Any]] = deque(maxlen=dwell_steps)
-        started = False
-        start_wall: float | None = None
-        while True:
-            if not started and Path(args.start_flag).exists():
-                started = True
-                start_wall = time.monotonic()
-            if started and start_wall is not None and time.monotonic() - start_wall > args.timeout_s:
-                write_json(
-                    Path(args.summary_path),
-                    {
-                        "created_at": now_iso(),
-                        "status": "timeout",
-                        "timeout_s": args.timeout_s,
-                        "fallen_z_threshold_m": args.fallen_z,
-                    },
-                )
-                return 1
-            root_pos = rt.np.asarray(data.xpos[pelvis_body_id], dtype=rt.np.float32)
-            root_vel = rt.np.asarray(data.cvel[pelvis_body_id, 3:6], dtype=rt.np.float32)
-            root_ang_vel = rt.np.asarray(data.cvel[pelvis_body_id, 0:3], dtype=rt.np.float32)
-            joint_vel = rt.np.asarray(data.qvel[6:], dtype=rt.np.float32)
-            if started:
-                history.append(
-                    {
-                        "root_pos": root_pos.copy(),
-                        "root_speed": float(rt.np.linalg.norm(root_vel)),
-                        "root_ang_speed": float(rt.np.linalg.norm(root_ang_vel)),
-                        "joint_vel_rms": float(rt.np.sqrt(rt.np.mean(joint_vel * joint_vel))),
-                    }
-                )
-                if len(history) == dwell_steps and all(sample["root_pos"][2] < args.fallen_z for sample in history):
-                    root_span = rt.np.linalg.norm(history[-1]["root_pos"] - history[0]["root_pos"])
-                    if (
-                        max(sample["root_speed"] for sample in history) <= args.stable_root_speed_mps
-                        and max(sample["root_ang_speed"] for sample in history) <= args.stable_ang_speed_rps
-                        and max(sample["joint_vel_rms"] for sample in history) <= args.stable_joint_speed_rms
-                        and float(root_span) <= args.stable_root_span_m
-                    ):
-                        snapshot_path = Path(args.snapshot_path)
-                        write_stage_state_npz(snapshot_path, data.qpos.copy(), data.qvel.copy(), float(root_pos[2]))
-                        write_json(
-                            Path(args.summary_path),
-                            {
-                                "created_at": now_iso(),
-                                "status": "captured",
-                                "snapshot_path": str(snapshot_path),
-                                "root_z_m": float(root_pos[2]),
-                                "stable_dwell_s": args.stable_dwell_s,
-                                "stable_root_span_m": args.stable_root_span_m,
-                            },
-                        )
-                        return 0
-            sim_step()
-            next_step += sim_dt
-            time.sleep(max(0.0, next_step - time.perf_counter()))
-
     if args.mode != "replay":
         raise ValueError(f"Unsupported sim runner mode {args.mode}")
     if not args.trajectory_path or not args.summary_path or not args.done_file:
@@ -2109,6 +2447,8 @@ def build_parser() -> argparse.ArgumentParser:
     p3.add_argument("--video-fps", type=int, default=25)
     p3.add_argument("--render-width", type=int, default=192)
     p3.add_argument("--render-height", type=int, default=108)
+    p3.add_argument("--failed-render-width", type=int, default=1920)
+    p3.add_argument("--failed-render-height", type=int, default=1080)
 
     p4 = subparsers.add_parser("render-failed-videos", help="Render one 1080p replay video per failed Stage 2 run")
     p4.add_argument("--stage2-dir", type=str, required=True)
@@ -2121,13 +2461,12 @@ def build_parser() -> argparse.ArgumentParser:
     p5.add_argument("--report-path", type=str, default="BFM_ZERO_FALLEN_RECOVERY_FAILURE_ANALYSIS.md")
 
     ps = subparsers.add_parser("_sim_runner", help=argparse.SUPPRESS)
-    ps.add_argument("--mode", choices=["capture-fallen", "replay"], required=True)
+    ps.add_argument("--mode", choices=["replay"], required=True)
     ps.add_argument("--robot-config", type=str, required=True)
     ps.add_argument("--scene-config", type=str, required=True)
     ps.add_argument("--ready-file", type=str, required=True)
     ps.add_argument("--start-flag", type=str, required=True)
     ps.add_argument("--initial-state", type=str, default=None)
-    ps.add_argument("--snapshot-path", type=str, default=None)
     ps.add_argument("--done-file", type=str, default=None)
     ps.add_argument("--summary-path", type=str, default=None)
     ps.add_argument("--trajectory-path", type=str, default=None)
@@ -2137,11 +2476,6 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--goal-key", type=str, default=DEFAULT_GOAL_KEY)
     ps.add_argument("--source-state-id", type=str, default="")
     ps.add_argument("--timeout-s", type=float, default=30.0)
-    ps.add_argument("--stable-dwell-s", type=float, default=0.25)
-    ps.add_argument("--stable-root-speed-mps", type=float, default=0.15)
-    ps.add_argument("--stable-ang-speed-rps", type=float, default=0.75)
-    ps.add_argument("--stable-joint-speed-rms", type=float, default=0.6)
-    ps.add_argument("--stable-root-span-m", type=float, default=0.03)
 
     return parser
 
