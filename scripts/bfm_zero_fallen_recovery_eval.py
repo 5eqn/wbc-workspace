@@ -609,6 +609,8 @@ def load_target_body_positions(
 
 
 def build_renderer(rt: SimpleNamespace, model: Any, width: int, height: int, pelvis_body_id: int) -> tuple[Any, Any]:
+    model.vis.global_.offwidth = max(int(model.vis.global_.offwidth), int(width))
+    model.vis.global_.offheight = max(int(model.vis.global_.offheight), int(height))
     renderer = rt.mujoco.Renderer(model, width=width, height=height)
     camera = rt.mujoco.MjvCamera()
     camera.type = rt.mujoco.mjtCamera.mjCAMERA_TRACKING
@@ -1283,6 +1285,637 @@ def manifest_seed_from_stage2(stage2_summary: dict[str, Any]) -> int:
     return int(manifest["seed"])
 
 
+def load_stage2_context(stage2_dir: Path) -> tuple[dict[str, Any], dict[str, Any], EvalLayout, list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    summary = load_json(stage2_summary_path(stage2_dir))
+    run_id = str(summary["run_id"])
+    layout = build_layout(run_id)
+    manifest = load_json(REPO_ROOT / str(summary["stage1_manifest"]))
+    run_summaries = [load_json(REPO_ROOT / str(path)) for path in summary["run_summaries"]]
+    states_by_id = {str(row["state_id"]): row for row in manifest["states"]}
+    return summary, manifest, layout, run_summaries, states_by_id
+
+
+def build_model_context(rt: SimpleNamespace) -> dict[str, Any]:
+    model = rt.mujoco.MjModel.from_xml_path(str(BFM_ZERO_DEPLOY_ROOT / "data" / "robots" / "g1" / "scene_29dof_freebase.xml"))
+    data = rt.mujoco.MjData(model)
+    policy_config = load_yaml(BFM_ZERO_DEPLOY_ROOT / "config" / "policy" / "motivo_newG1.yaml")
+    robot_config = load_yaml(BFM_ZERO_DEPLOY_ROOT / "config" / "robot" / "g1.yaml")
+    joint_names = [str(name) for name in policy_config["isaac_joint_names"]]
+    joint_qpos_ids, joint_qvel_ids, _ = build_joint_mappings(rt, model, joint_names)
+    body_ids, pelvis_body_id, extend_parent_body_id = build_body_ids(rt, model)
+    default_dof_angles = resolve_joint_array(rt, policy_config["default_joint_pos"], joint_names)
+    left_right_pairs = [
+        (name, name.replace("left_", "right_"))
+        for name in joint_names
+        if name.startswith("left_") and name.replace("left_", "right_") in joint_names
+    ]
+    pair_indices = [(joint_names.index(left), joint_names.index(right), left, right) for left, right in left_right_pairs]
+    leg_joint_indices = [
+        idx
+        for idx, name in enumerate(joint_names)
+        if any(token in name for token in ("hip_", "knee_", "ankle_"))
+    ]
+    arm_joint_indices = [
+        idx
+        for idx, name in enumerate(joint_names)
+        if any(token in name for token in ("shoulder_", "elbow_", "wrist_"))
+    ]
+    waist_joint_indices = [idx for idx, name in enumerate(joint_names) if name.startswith("waist_")]
+    return {
+        "model": model,
+        "data": data,
+        "joint_names": joint_names,
+        "joint_qpos_ids": joint_qpos_ids,
+        "joint_qvel_ids": joint_qvel_ids,
+        "body_ids": body_ids,
+        "pelvis_body_id": pelvis_body_id,
+        "extend_parent_body_id": extend_parent_body_id,
+        "default_dof_angles": default_dof_angles,
+        "pair_indices": pair_indices,
+        "leg_joint_indices": leg_joint_indices,
+        "arm_joint_indices": arm_joint_indices,
+        "waist_joint_indices": waist_joint_indices,
+    }
+
+
+def quat_to_rpy_wxyz(quat_wxyz: Any) -> tuple[float, float, float]:
+    w, x, y, z = [float(v) for v in quat_wxyz]
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+
+    sinp = 2.0 * (w * y - z * x)
+    if abs(sinp) >= 1.0:
+        pitch = math.copysign(math.pi / 2.0, sinp)
+    else:
+        pitch = math.asin(sinp)
+
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    return roll, pitch, yaw
+
+
+def quat_rotate_vector_wxyz(rt: SimpleNamespace, quat_wxyz: Any, vec: Any) -> Any:
+    q = rt.np.asarray(quat_wxyz, dtype=rt.np.float64)
+    v = rt.np.asarray(vec, dtype=rt.np.float64)
+    q_vec = q[1:]
+    uv = rt.np.cross(q_vec, v)
+    uuv = rt.np.cross(q_vec, uv)
+    return v + 2.0 * (q[0] * uv + uuv)
+
+
+def classify_root_orientation(rt: SimpleNamespace, quat_wxyz: Any) -> str:
+    body_up_world = quat_rotate_vector_wxyz(rt, quat_wxyz, [0.0, 0.0, 1.0])
+    axis = int(rt.np.argmax(rt.np.abs(body_up_world)))
+    sign = 1.0 if body_up_world[axis] >= 0.0 else -1.0
+    if axis == 2:
+        return "upright" if sign > 0.0 else "upside_down"
+    if axis == 0:
+        return "prone" if sign > 0.0 else "supine"
+    return "left_side" if sign > 0.0 else "right_side"
+
+
+def contact_features_for_state(rt: SimpleNamespace, model: Any, data: Any) -> dict[str, Any]:
+    self_pairs: set[tuple[str, str]] = set()
+    floor_bodies: set[str] = set()
+    self_contact_count = 0
+    floor_contact_count = 0
+    for idx in range(int(data.ncon)):
+        contact = data.contact[idx]
+        body1 = int(model.geom_bodyid[contact.geom1])
+        body2 = int(model.geom_bodyid[contact.geom2])
+        if body1 == body2:
+            continue
+        name1 = str(model.body(body1).name)
+        name2 = str(model.body(body2).name)
+        if body1 == 0 or body2 == 0:
+            floor_contact_count += 1
+            floor_bodies.add(name2 if body1 == 0 else name1)
+            continue
+        self_contact_count += 1
+        self_pairs.add(tuple(sorted((name1, name2))))
+    return {
+        "self_contact_count": self_contact_count,
+        "self_contact_pairs": [" <-> ".join(pair) for pair in sorted(self_pairs)],
+        "self_contact_pair_count": len(self_pairs),
+        "floor_contact_count": floor_contact_count,
+        "floor_contact_bodies": sorted(body for body in floor_bodies if body and body != "world"),
+        "floor_contact_body_count": len([body for body in floor_bodies if body and body != "world"]),
+    }
+
+
+def safe_mean(values: list[float]) -> float:
+    return float(sum(values) / len(values)) if values else float("nan")
+
+
+def safe_std(rt: SimpleNamespace, values: Any) -> float:
+    arr = rt.np.asarray(values, dtype=rt.np.float64)
+    if arr.size == 0:
+        return float("nan")
+    return float(arr.std(ddof=1)) if arr.size > 1 else 0.0
+
+
+def cohen_d(rt: SimpleNamespace, a: Any, b: Any) -> float:
+    a = rt.np.asarray(a, dtype=rt.np.float64)
+    b = rt.np.asarray(b, dtype=rt.np.float64)
+    if a.size == 0 or b.size == 0:
+        return float("nan")
+    var_a = a.var(ddof=1) if a.size > 1 else 0.0
+    var_b = b.var(ddof=1) if b.size > 1 else 0.0
+    pooled_num = (a.size - 1) * var_a + (b.size - 1) * var_b
+    pooled_den = max(a.size + b.size - 2, 1)
+    pooled = math.sqrt(max(pooled_num / pooled_den, 0.0))
+    if pooled == 0.0:
+        return 0.0
+    return float((a.mean() - b.mean()) / pooled)
+
+
+def point_biserial(rt: SimpleNamespace, values: Any, labels: Any) -> float:
+    x = rt.np.asarray(values, dtype=rt.np.float64)
+    y = rt.np.asarray(labels, dtype=rt.np.float64)
+    if x.size == 0 or y.size == 0 or x.size != y.size or rt.np.std(x) == 0.0 or rt.np.std(y) == 0.0:
+        return 0.0
+    return float(rt.np.corrcoef(x, y)[0, 1])
+
+
+def render_video_from_qpos(
+    rt: SimpleNamespace,
+    model: Any,
+    data: Any,
+    renderer: Any,
+    camera: Any,
+    qpos: Any,
+    sample_indices: Any,
+    fps: int,
+    output_path: Path,
+) -> None:
+    writer = rt.imageio.get_writer(output_path, fps=fps, codec="libx264", macro_block_size=None)
+    try:
+        for sample_idx in sample_indices:
+            frame = render_frame(rt, renderer, camera, model, data, qpos[int(sample_idx)])
+            writer.append_data(frame)
+    finally:
+        writer.close()
+
+
+def render_failed_videos(args: argparse.Namespace) -> int:
+    rt = runtime()
+    stage2_dir = Path(args.stage2_dir)
+    summary, _, layout, run_summaries, _ = load_stage2_context(stage2_dir)
+    failed_runs = [row for row in run_summaries if not bool(row["success"])]
+    if not failed_runs:
+        raise ValueError("Stage 2 summary contains no failed runs")
+
+    ctx = build_model_context(rt)
+    model = ctx["model"]
+    data = ctx["data"]
+    renderer, camera = build_renderer(rt, model, args.render_width, args.render_height, int(ctx["pelvis_body_id"]))
+    first_traj = rt.np.load(REPO_ROOT / str(failed_runs[0]["trajectory_path"]))
+    time_s = rt.np.asarray(first_traj["time_s"], dtype=rt.np.float32)
+    render_times = rt.np.arange(0.0, float(summary["horizon_s"]) + 1e-9, 1.0 / args.video_fps, dtype=rt.np.float32)
+    render_indices = rt.np.clip(rt.np.searchsorted(time_s, render_times, side="left"), 0, len(time_s) - 1)
+
+    output_paths: list[str] = []
+    for run_summary in failed_runs:
+        run_name = Path(str(run_summary["summary_path"])).parent.name
+        state_id = str(run_summary["source_state"]["state_id"])
+        output_path = layout.stage3_dir / f"{run_name}_{state_id}_1080p.mp4"
+        traj = rt.np.load(REPO_ROOT / str(run_summary["trajectory_path"]))
+        qpos = rt.np.asarray(traj["qpos"], dtype=rt.np.float32)
+        render_video_from_qpos(rt, model, data, renderer, camera, qpos, render_indices, args.video_fps, output_path)
+        output_paths.append(repo_rel(output_path))
+    renderer.close()
+
+    index_path = layout.stage3_dir / "failed_videos_index.json"
+    write_json(
+        index_path,
+        {
+            "run_id": str(summary["run_id"]),
+            "created_at": now_iso(),
+            "video_fps": args.video_fps,
+            "render_width": args.render_width,
+            "render_height": args.render_height,
+            "failed_videos": output_paths,
+        },
+    )
+    stage3_summary = load_json(stage3_summary_path(layout.stage3_dir))
+    stage3_summary.setdefault("artifacts", {})
+    stage3_summary["artifacts"]["failed_videos_index"] = repo_rel(index_path)
+    stage3_summary["artifacts"]["failed_videos_1080p"] = output_paths
+    write_json(stage3_summary_path(layout.stage3_dir), stage3_summary)
+    print(json.dumps({"failed_video_count": len(output_paths), "failed_videos_index": repo_rel(index_path)}, indent=2))
+    return 0
+
+
+def analyze_failures(args: argparse.Namespace) -> int:
+    rt = runtime()
+    stage2_dir = Path(args.stage2_dir)
+    summary, manifest, layout, run_summaries, states_by_id = load_stage2_context(stage2_dir)
+    ctx = build_model_context(rt)
+    model = ctx["model"]
+    data = ctx["data"]
+    joint_names: list[str] = ctx["joint_names"]
+    joint_qpos_ids = ctx["joint_qpos_ids"]
+    joint_qvel_ids = ctx["joint_qvel_ids"]
+    default_dof_angles = ctx["default_dof_angles"]
+    pair_indices = ctx["pair_indices"]
+    leg_joint_indices = ctx["leg_joint_indices"]
+    arm_joint_indices = ctx["arm_joint_indices"]
+    waist_joint_indices = ctx["waist_joint_indices"]
+
+    rows: list[dict[str, Any]] = []
+    joint_pos_matrix = rt.np.zeros((len(run_summaries), len(joint_names)), dtype=rt.np.float64)
+    joint_vel_matrix = rt.np.zeros((len(run_summaries), len(joint_names)), dtype=rt.np.float64)
+    fail_mask = rt.np.zeros(len(run_summaries), dtype=bool)
+
+    for idx, run_summary in enumerate(run_summaries):
+        state_id = str(run_summary["source_state"]["state_id"])
+        state_row = states_by_id[state_id]
+        qpos0, qvel0, root_z0 = load_stage_state_npz(REPO_ROOT / str(state_row["state_path"]))
+        joint_pos = rt.np.asarray(qpos0[joint_qpos_ids], dtype=rt.np.float64)
+        joint_vel = rt.np.asarray(qvel0[joint_qvel_ids], dtype=rt.np.float64)
+        data.qpos[:] = qpos0
+        data.qvel[:] = qvel0
+        rt.mujoco.mj_forward(model, data)
+        contacts = contact_features_for_state(rt, model, data)
+        roll, pitch, yaw = quat_to_rpy_wxyz(qpos0[3:7])
+        orientation = classify_root_orientation(rt, qpos0[3:7])
+
+        leg_asymmetry = safe_mean([abs(joint_pos[left] - joint_pos[right]) for left, right, _, _ in pair_indices if left in leg_joint_indices])
+        arm_asymmetry = safe_mean([abs(joint_pos[left] - joint_pos[right]) for left, right, _, _ in pair_indices if left in arm_joint_indices])
+        row = {
+            "run_name": Path(str(run_summary["summary_path"])).parent.name,
+            "run_index": idx,
+            "state_id": state_id,
+            "state_source": str(state_row["source"]),
+            "goal_key": state_row.get("goal_key"),
+            "success": bool(run_summary["success"]),
+            "failure": not bool(run_summary["success"]),
+            "final_window_mean_root_z_m": float(run_summary["final_window_mean_root_z_m"]),
+            "max_root_z_m": float(run_summary["max_root_z_m"]),
+            "initial_root_z_m": float(root_z0),
+            "root_xy_radius_m": float(rt.np.linalg.norm(qpos0[0:2])),
+            "root_roll_deg": math.degrees(roll),
+            "root_pitch_deg": math.degrees(pitch),
+            "root_yaw_deg": math.degrees(yaw),
+            "root_tilt_deg": math.degrees(math.sqrt(roll * roll + pitch * pitch)),
+            "root_lin_speed_mps": float(rt.np.linalg.norm(qvel0[0:3])),
+            "root_ang_speed_rps": float(rt.np.linalg.norm(qvel0[3:6])),
+            "joint_vel_rms": float(rt.np.sqrt(rt.np.mean(joint_vel * joint_vel))),
+            "joint_vel_abs_max": float(rt.np.max(rt.np.abs(joint_vel))),
+            "joint_abs_mean_rad": float(rt.np.mean(rt.np.abs(joint_pos))),
+            "joint_abs_max_rad": float(rt.np.max(rt.np.abs(joint_pos))),
+            "joint_pos_l2_from_default": float(rt.np.linalg.norm(joint_pos - default_dof_angles)),
+            "leg_joint_abs_mean_rad": float(rt.np.mean(rt.np.abs(joint_pos[leg_joint_indices]))),
+            "arm_joint_abs_mean_rad": float(rt.np.mean(rt.np.abs(joint_pos[arm_joint_indices]))),
+            "waist_abs_sum_rad": float(rt.np.sum(rt.np.abs(joint_pos[waist_joint_indices]))),
+            "hip_pitch_abs_sum_rad": float(abs(joint_pos[joint_names.index("left_hip_pitch_joint")]) + abs(joint_pos[joint_names.index("right_hip_pitch_joint")])),
+            "knee_flex_sum_rad": float(joint_pos[joint_names.index("left_knee_joint")] + joint_pos[joint_names.index("right_knee_joint")]),
+            "ankle_pitch_abs_sum_rad": float(abs(joint_pos[joint_names.index("left_ankle_pitch_joint")]) + abs(joint_pos[joint_names.index("right_ankle_pitch_joint")])),
+            "leg_asymmetry_l1_rad": float(leg_asymmetry),
+            "arm_asymmetry_l1_rad": float(arm_asymmetry),
+            "orientation_bin": orientation,
+            **contacts,
+        }
+        rows.append(row)
+        joint_pos_matrix[idx] = joint_pos
+        joint_vel_matrix[idx] = joint_vel
+        fail_mask[idx] = row["failure"]
+
+    fail_rows = [row for row in rows if row["failure"]]
+    success_rows = [row for row in rows if not row["failure"]]
+    if not fail_rows:
+        raise ValueError("No failed runs available for analysis")
+    labels = fail_mask.astype(rt.np.float64)
+
+    scalar_feature_names = [
+        "initial_root_z_m",
+        "root_xy_radius_m",
+        "root_roll_deg",
+        "root_pitch_deg",
+        "root_yaw_deg",
+        "root_tilt_deg",
+        "root_lin_speed_mps",
+        "root_ang_speed_rps",
+        "joint_vel_rms",
+        "joint_vel_abs_max",
+        "joint_abs_mean_rad",
+        "joint_abs_max_rad",
+        "joint_pos_l2_from_default",
+        "leg_joint_abs_mean_rad",
+        "arm_joint_abs_mean_rad",
+        "waist_abs_sum_rad",
+        "hip_pitch_abs_sum_rad",
+        "knee_flex_sum_rad",
+        "ankle_pitch_abs_sum_rad",
+        "leg_asymmetry_l1_rad",
+        "arm_asymmetry_l1_rad",
+        "self_contact_pair_count",
+        "floor_contact_body_count",
+    ]
+    scalar_rankings = []
+    for name in scalar_feature_names:
+        fail_vals = [float(row[name]) for row in fail_rows]
+        succ_vals = [float(row[name]) for row in success_rows]
+        all_vals = [float(row[name]) for row in rows]
+        scalar_rankings.append(
+            {
+                "feature": name,
+                "fail_mean": safe_mean(fail_vals),
+                "success_mean": safe_mean(succ_vals),
+                "mean_diff": safe_mean(fail_vals) - safe_mean(succ_vals),
+                "fail_std": safe_std(rt, fail_vals),
+                "success_std": safe_std(rt, succ_vals),
+                "cohen_d": cohen_d(rt, fail_vals, succ_vals),
+                "point_biserial": point_biserial(rt, all_vals, labels),
+            }
+        )
+    scalar_rankings.sort(key=lambda row: abs(float(row["cohen_d"])), reverse=True)
+
+    joint_rankings = []
+    success_joint_mean = joint_pos_matrix[~fail_mask].mean(axis=0)
+    success_joint_std = joint_pos_matrix[~fail_mask].std(axis=0, ddof=1)
+    success_joint_std[success_joint_std == 0.0] = 1e-6
+    for idx, name in enumerate(joint_names):
+        fail_vals = joint_pos_matrix[fail_mask, idx]
+        succ_vals = joint_pos_matrix[~fail_mask, idx]
+        joint_rankings.append(
+            {
+                "joint": name,
+                "fail_mean_rad": float(fail_vals.mean()),
+                "success_mean_rad": float(succ_vals.mean()),
+                "mean_diff_rad": float(fail_vals.mean() - succ_vals.mean()),
+                "cohen_d": cohen_d(rt, fail_vals, succ_vals),
+                "point_biserial": point_biserial(rt, joint_pos_matrix[:, idx], labels),
+            }
+        )
+    joint_rankings.sort(key=lambda row: abs(float(row["cohen_d"])), reverse=True)
+
+    joint_velocity_rankings = []
+    for idx, name in enumerate(joint_names):
+        fail_vals = joint_vel_matrix[fail_mask, idx]
+        succ_vals = joint_vel_matrix[~fail_mask, idx]
+        joint_velocity_rankings.append(
+            {
+                "joint": name,
+                "fail_mean_rad_s": float(fail_vals.mean()),
+                "success_mean_rad_s": float(succ_vals.mean()),
+                "mean_diff_rad_s": float(fail_vals.mean() - succ_vals.mean()),
+                "cohen_d": cohen_d(rt, fail_vals, succ_vals),
+                "point_biserial": point_biserial(rt, joint_vel_matrix[:, idx], labels),
+            }
+        )
+    joint_velocity_rankings.sort(key=lambda row: abs(float(row["cohen_d"])), reverse=True)
+
+    orientation_stats: list[dict[str, Any]] = []
+    for orientation in sorted({str(row["orientation_bin"]) for row in rows}):
+        total = sum(1 for row in rows if row["orientation_bin"] == orientation)
+        failed = sum(1 for row in fail_rows if row["orientation_bin"] == orientation)
+        orientation_stats.append(
+            {
+                "orientation": orientation,
+                "count": total,
+                "failed": failed,
+                "failure_rate": float(failed / total) if total else float("nan"),
+            }
+        )
+    orientation_stats.sort(key=lambda row: (float(row["failure_rate"]), row["count"]), reverse=True)
+
+    contact_pair_stats: list[dict[str, Any]] = []
+    all_pairs = sorted({pair for row in rows for pair in row["self_contact_pairs"]})
+    for pair in all_pairs:
+        total = sum(1 for row in rows if pair in row["self_contact_pairs"])
+        failed = sum(1 for row in fail_rows if pair in row["self_contact_pairs"])
+        if total == 0:
+            continue
+        contact_pair_stats.append(
+            {
+                "pair": pair,
+                "count": total,
+                "failed": failed,
+                "failure_rate": float(failed / total),
+            }
+        )
+    contact_pair_stats.sort(key=lambda row: (row["failure_rate"], row["failed"], row["count"]), reverse=True)
+
+    failure_notes = []
+    for row in fail_rows:
+        run_idx = int(row["run_index"])
+        zscores = rt.np.abs((joint_pos_matrix[run_idx] - success_joint_mean) / success_joint_std)
+        top_joint_ids = rt.np.argsort(zscores)[::-1][:3]
+        top_joints = [
+            {
+                "joint": joint_names[int(joint_id)],
+                "value_rad": float(joint_pos_matrix[run_idx, int(joint_id)]),
+                "success_mean_rad": float(success_joint_mean[int(joint_id)]),
+                "z_score": float(zscores[int(joint_id)]),
+            }
+            for joint_id in top_joint_ids
+        ]
+        severity = "near_recovery" if float(row["final_window_mean_root_z_m"]) > 0.6 else "grounded"
+        failure_notes.append(
+            {
+                "run_name": row["run_name"],
+                "state_id": row["state_id"],
+                "severity": severity,
+                "final_window_mean_root_z_m": row["final_window_mean_root_z_m"],
+                "max_root_z_m": row["max_root_z_m"],
+                "orientation_bin": row["orientation_bin"],
+                "self_contact_pairs": row["self_contact_pairs"],
+                "floor_contact_bodies": row["floor_contact_bodies"],
+                "top_joint_outliers": top_joints,
+            }
+        )
+
+    analysis_json = layout.stage3_dir / "failure_analysis.json"
+    analysis_payload = {
+        "run_id": str(summary["run_id"]),
+        "created_at": now_iso(),
+        "stage2_summary": repo_rel(stage2_summary_path(stage2_dir)),
+        "stage3_summary": repo_rel(stage3_summary_path(layout.stage3_dir)),
+        "num_runs": len(rows),
+        "success_count": len(success_rows),
+        "failure_count": len(fail_rows),
+        "scalar_rankings": scalar_rankings,
+        "joint_rankings": joint_rankings,
+        "joint_velocity_rankings": joint_velocity_rankings,
+        "orientation_stats": orientation_stats,
+        "contact_pair_stats": contact_pair_stats,
+        "failure_notes": failure_notes,
+    }
+    write_json(analysis_json, analysis_payload)
+
+    report_path = Path(args.report_path)
+    if not report_path.is_absolute():
+        report_path = REPO_ROOT / report_path
+    failed_video_index = layout.stage3_dir / "failed_videos_index.json"
+    failed_video_paths = []
+    if failed_video_index.exists():
+        failed_video_paths = list(load_json(failed_video_index).get("failed_videos", []))
+
+    top_scalar = scalar_rankings[:8]
+    top_joints = joint_rankings[:8]
+    top_joint_vels = joint_velocity_rankings[:5]
+    top_contact_pairs = [row for row in contact_pair_stats if row["failed"] > 0][:8]
+    report_lines = [
+        "# BFM-Zero Fallen-Recovery Failure Analysis",
+        "",
+        f"Generated: `{now_iso()}`",
+        "",
+        "## Scope",
+        "",
+        f"- Run set: `{summary['run_id']}`",
+        f"- Stage 2 summary: `{repo_rel(stage2_summary_path(stage2_dir))}`",
+        f"- Stage 3 summary: `{repo_rel(stage3_summary_path(layout.stage3_dir))}`",
+        f"- Population: `{len(rows)}` total runs, `{len(success_rows)}` successes, `{len(fail_rows)}` failures",
+        f"- Recovery criterion: final `0.5 s` mean root height `> {summary['recovery_z_threshold_m']:.2f} m`",
+        "",
+        "## Failed Run Inventory",
+        "",
+        "| Run | State | Source | Final mean root z (m) | Max root z (m) | Orientation | Self-contact pairs |",
+        "| --- | --- | --- | ---: | ---: | --- | --- |",
+    ]
+    for note in failure_notes:
+        report_lines.append(
+            f"| `{note['run_name']}` | `{note['state_id']}` | `{states_by_id[note['state_id']]['source']}` | "
+            f"{note['final_window_mean_root_z_m']:.3f} | {note['max_root_z_m']:.3f} | `{note['orientation_bin']}` | "
+            f"{'; '.join(note['self_contact_pairs']) if note['self_contact_pairs'] else 'none'} |"
+        )
+    report_lines.extend(
+        [
+            "",
+            "## Failed Video Exports",
+            "",
+            f"- Tiled video: `{repo_rel(layout.stage3_dir / 'tiled_runs.mp4')}`",
+            f"- Failed-video index: `{repo_rel(failed_video_index) if failed_video_index.exists() else 'not generated yet'}`",
+        ]
+    )
+    report_lines.extend([f"- `{path}`" for path in failed_video_paths] or ["- No failed-video exports were present when this report was generated."])
+
+    report_lines.extend(
+        [
+            "",
+            "## Strongest Scalar Separators",
+            "",
+            "| Feature | Failure mean | Success mean | Mean diff | Cohen d | Point-biserial r |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in top_scalar:
+        report_lines.append(
+            f"| `{row['feature']}` | {row['fail_mean']:.3f} | {row['success_mean']:.3f} | {row['mean_diff']:.3f} | "
+            f"{row['cohen_d']:.2f} | {row['point_biserial']:.2f} |"
+        )
+
+    report_lines.extend(
+        [
+            "",
+            "## Joint Position Outliers",
+            "",
+            "| Joint | Failure mean (rad) | Success mean (rad) | Mean diff (rad) | Cohen d | r |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in top_joints:
+        report_lines.append(
+            f"| `{row['joint']}` | {row['fail_mean_rad']:.3f} | {row['success_mean_rad']:.3f} | {row['mean_diff_rad']:.3f} | "
+            f"{row['cohen_d']:.2f} | {row['point_biserial']:.2f} |"
+        )
+
+    report_lines.extend(
+        [
+            "",
+            "## Joint Velocity Outliers",
+            "",
+            "| Joint | Failure mean (rad/s) | Success mean (rad/s) | Mean diff (rad/s) | Cohen d | r |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in top_joint_vels:
+        report_lines.append(
+            f"| `{row['joint']}` | {row['fail_mean_rad_s']:.3f} | {row['success_mean_rad_s']:.3f} | {row['mean_diff_rad_s']:.3f} | "
+            f"{row['cohen_d']:.2f} | {row['point_biserial']:.2f} |"
+        )
+
+    report_lines.extend(
+        [
+            "",
+            "## Orientation Bins",
+            "",
+            "Orientation labels are approximate axis-based bins inferred from the floating-base quaternion, assuming the torso body frame uses `+x` forward, `+y` left, `+z` up.",
+            "",
+            "| Orientation | Count | Failures | Failure rate |",
+            "| --- | ---: | ---: | ---: |",
+        ]
+    )
+    for row in orientation_stats:
+        report_lines.append(f"| `{row['orientation']}` | {row['count']} | {row['failed']} | {row['failure_rate']:.2%} |")
+
+    report_lines.extend(
+        [
+            "",
+            "## Self-Collision Signatures",
+            "",
+            "| Body pair | Count | Failures | Failure rate |",
+            "| --- | ---: | ---: | ---: |",
+        ]
+    )
+    for row in top_contact_pairs:
+        report_lines.append(f"| `{row['pair']}` | {row['count']} | {row['failed']} | {row['failure_rate']:.2%} |")
+
+    report_lines.extend(
+        [
+            "",
+            "## Per-Failure Notes",
+            "",
+        ]
+    )
+    for note in failure_notes:
+        report_lines.append(f"### `{note['run_name']}` / `{note['state_id']}`")
+        report_lines.append("")
+        report_lines.append(f"- Severity: `{note['severity']}`")
+        report_lines.append(f"- Final mean root height: `{note['final_window_mean_root_z_m']:.3f} m`")
+        report_lines.append(f"- Max root height during rollout: `{note['max_root_z_m']:.3f} m`")
+        report_lines.append(f"- Orientation bin: `{note['orientation_bin']}`")
+        report_lines.append(f"- Self-contact pairs: `{'; '.join(note['self_contact_pairs']) if note['self_contact_pairs'] else 'none'}`")
+        report_lines.append(f"- Floor-contact bodies: `{'; '.join(note['floor_contact_bodies']) if note['floor_contact_bodies'] else 'none'}`")
+        report_lines.append("- Strongest joint-position deviations vs success set:")
+        for joint in note["top_joint_outliers"]:
+            report_lines.append(
+                f"  - `{joint['joint']}` = `{joint['value_rad']:.3f} rad` "
+                f"(success mean `{joint['success_mean_rad']:.3f} rad`, z-score `{joint['z_score']:.2f}`)"
+            )
+        report_lines.append("")
+
+    report_lines.extend(
+        [
+            "## Best-Effort Findings",
+            "",
+            f"- The failed set is small (`{len(fail_rows)}` runs), so the strongest signals should be treated as ranking cues rather than hard causal proof.",
+            f"- The single strongest pose-level separator is `{top_scalar[0]['feature']}` with Cohen d `{top_scalar[0]['cohen_d']:.2f}`.",
+            f"- The single strongest joint-position separator is `{top_joints[0]['joint']}` with Cohen d `{top_joints[0]['cohen_d']:.2f}`.",
+            f"- The most failure-loaded self-contact pair is `{top_contact_pairs[0]['pair']}` at `{top_contact_pairs[0]['failure_rate']:.2%}` failure rate when present." if top_contact_pairs else "- No self-contact pair appeared often enough to stand out over the success set.",
+            f"- `{sum(1 for note in failure_notes if note['severity'] == 'near_recovery')}` of the `{len(failure_notes)}` failures were near misses; the rest stayed substantially below the recovery threshold.",
+            "",
+            "## Caveats",
+            "",
+            "- This analysis is intentionally best effort and observational. It ranks initial-state traits associated with failure but does not isolate policy causality from all confounders.",
+            "- Contact features were computed from the Stage 1 saved state at rollout start, not from the entire rollout.",
+            f"- Machine-readable details are available in `{repo_rel(analysis_json)}`.",
+        ]
+    )
+    report_path.write_text("\n".join(report_lines) + "\n")
+
+    stage3_summary = load_json(stage3_summary_path(layout.stage3_dir))
+    stage3_summary.setdefault("artifacts", {})
+    stage3_summary["artifacts"]["failure_analysis_json"] = repo_rel(analysis_json)
+    stage3_summary["artifacts"]["failure_analysis_report"] = repo_rel(report_path)
+    write_json(stage3_summary_path(layout.stage3_dir), stage3_summary)
+    print(json.dumps({"failure_analysis_report": repo_rel(report_path), "failure_analysis_json": repo_rel(analysis_json)}, indent=2))
+    return 0
+
+
 def sim_runner(args: argparse.Namespace) -> int:
     rt = runtime()
     robot_config = load_yaml(Path(args.robot_config))
@@ -1477,6 +2110,16 @@ def build_parser() -> argparse.ArgumentParser:
     p3.add_argument("--render-width", type=int, default=192)
     p3.add_argument("--render-height", type=int, default=108)
 
+    p4 = subparsers.add_parser("render-failed-videos", help="Render one 1080p replay video per failed Stage 2 run")
+    p4.add_argument("--stage2-dir", type=str, required=True)
+    p4.add_argument("--video-fps", type=int, default=25)
+    p4.add_argument("--render-width", type=int, default=1920)
+    p4.add_argument("--render-height", type=int, default=1080)
+
+    p5 = subparsers.add_parser("analyze-failures", help="Analyze which initial states are associated with failed recoveries")
+    p5.add_argument("--stage2-dir", type=str, required=True)
+    p5.add_argument("--report-path", type=str, default="BFM_ZERO_FALLEN_RECOVERY_FAILURE_ANALYSIS.md")
+
     ps = subparsers.add_parser("_sim_runner", help=argparse.SUPPRESS)
     ps.add_argument("--mode", choices=["capture-fallen", "replay"], required=True)
     ps.add_argument("--robot-config", type=str, required=True)
@@ -1513,6 +2156,10 @@ def main() -> int:
         return stage2(args)
     if args.command == "stage3":
         return stage3(args)
+    if args.command == "render-failed-videos":
+        return render_failed_videos(args)
+    if args.command == "analyze-failures":
+        return analyze_failures(args)
     if args.command == "_sim_runner":
         return sim_runner(args)
     raise ValueError(f"Unknown command {args.command}")
