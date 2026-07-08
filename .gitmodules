@@ -22,3 +22,9 @@
 [submodule "thirdparties/cyclonedds"]
 	path = thirdparties/cyclonedds
 	url = https://github.com/eclipse-cyclonedds/cyclonedds
+[submodule "thirdparties/BFM-Zero"]
+	path = thirdparties/BFM-Zero
+	url = https://github.com/LeCAR-Lab/BFM-Zero
+[submodule "thirdparties/BFM-Zero-deploy"]
+	path = thirdparties/BFM-Zero-deploy
+	url = https://github.com/LeCAR-Lab/BFM-Zero

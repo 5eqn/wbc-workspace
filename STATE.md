@@ -14,6 +14,7 @@
 | 2026-06-16T09:48:13+08:00 | SONIC-MANUAL-VIEWER-FLOW | Added optional host MuJoCo viewer support to `scripts/sim_bridge.py` and simplified the manual SONIC skill to a two-command workflow that uses SONIC's in-tree `reference/benchmark` motion library for manual `N/P` selection. |
 | 2026-06-16T10:37:34+08:00 | SONIC-MANUAL-INTERACTIVE-WINDOW | Changed `scripts/sim_bridge.py --viewer` to open MuJoCo's full interactive Simulate window via the bridge-owned loop, and disabled fall early-stop while that window mode is active so manual reset can be used. |
 | 2026-06-16T11:09:14+08:00 | SONIC-MANUAL-BENCHMARK-SCENE | Switched the manual SONIC host workflow to the same benchmark-owned `GR00T-WholeBodyControl` G1 29-DOF scene used by the automated path, instead of the `unitree_mujoco` host scene. |
+| 2026-07-08T21:02:00+08:00 | BFM-ZERO-FALLEN-RECOVERY | Added a repo-owned three-stage fallen-recovery workflow around `thirdparties/BFM-Zero-deploy`: Stage 1 static fallen-state generation, Stage 2 isolated simulator+deployer replays with keyboard-driven goal selection, and Stage 3 offline metrics, plots, and tiled video generation under repo log/artifact paths. |
 
 ## Files
 
@@ -32,6 +33,8 @@
 | `scripts/sim_bridge.py` | SONIC-MANUAL-INTERACTIVE-WINDOW | Host-side MuJoCo DDS bridge for split SONIC manual-control runs, with optional interactive Simulate window launch, explicit `DISPLAY` failure reporting, and viewer-mode fall-stop suppression. |
 | `scripts/fallprobe_*.py` | INIT | Fall-probing analysis helpers. |
 | `scripts/humanoid_gpt_*.py` | INIT | Humanoid-GPT translation, built-in evaluation, and deploy entrypoints. |
+| `scripts/bfm_zero_fallen_recovery_eval.py` | BFM-ZERO-FALLEN-RECOVERY | Repo-owned three-stage BFM-Zero fallen-recovery CLI with `stage1`, `stage2`, `stage3`, plus a hidden headless simulator subprocess path used for isolated deploy replays and offline post-processing. |
+| `thirdparties/BFM-Zero-deploy/sshkeyboard.py` | BFM-ZERO-FALLEN-RECOVERY | Local PTY-friendly keyboard shim that lets the unmodified BFM-Zero deployer consume scripted `n` and `]` key events during automated stage replays. |
 | `thirdparties/run-sonic/GR00T-WholeBodyControl-main/verification/MANUAL_TEST_GUIDE.md` | HOST-SONIC-SPLIT | Manual SONIC/HoloMotion shared-simulator guide that documents the interactive `N/P`, `]`, and `T` control flow and support-release ordering. |
 | `thirdparties/GR00T-WholeBodyControl/gear_sonic_deploy/reference/benchmark/*` | SONIC-MANUAL-VIEWER-FLOW | SONIC's in-tree multi-motion reference library used by the simplified manual `N/P` browsing workflow. |
 | `.agents/skills/sonic-manual-sim2sim/*` | SONIC-MANUAL-BENCHMARK-SCENE | Repo skill for the simplified manual SONIC workflow: host interactive-window bridge on the benchmark-owned G1 29-DOF scene, interactive Docker SONIC, and in-tree `reference/benchmark` motion browsing. |
@@ -59,6 +62,8 @@
 | `logs/isaac-urdf-smoke/*` | INIT | Isaac URDF smoke outputs. |
 | `logs/isaac-usd-smoke/*` | INIT | Isaac USD smoke outputs. |
 | `logs/quick_unitree_sdk2py/*` | INIT | Quick Unitree SDK2 Python smoke outputs. |
+| `logs/bfm-zero-fallen-recovery/*` | BFM-ZERO-FALLEN-RECOVERY | Stage 1 initial-state manifests and `.npz` states, Stage 2 per-run trajectory logs and summaries, plus stop-policy investigations for BFM-Zero fallen-recovery replays. |
+| `artifacts/bfm-zero-fallen-recovery/*` | BFM-ZERO-FALLEN-RECOVERY | Stage 3 fallen-recovery metrics archives, MPJPE and latent-cosine plots, base-height plots, and tiled replay videos generated from Stage 2 logs. |
 
 ## Skills
 
