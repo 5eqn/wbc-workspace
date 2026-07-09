@@ -16,6 +16,7 @@
 | 2026-06-16T11:09:14+08:00 | SONIC-MANUAL-BENCHMARK-SCENE | Switched the manual SONIC host workflow to the same benchmark-owned `GR00T-WholeBodyControl` G1 29-DOF scene used by the automated path, instead of the `unitree_mujoco` host scene. |
 | 2026-07-08T21:02:00+08:00 | BFM-ZERO-FALLEN-RECOVERY | Added a repo-owned three-stage fallen-recovery workflow around `thirdparties/BFM-Zero-deploy`: Stage 1 static fallen-state generation, Stage 2 isolated simulator+deployer replays with keyboard-driven goal selection, Stage 3 offline metrics and tiled video generation, plus failure-only 1080p replay exports and a tracked initial-state failure analysis report. |
 | 2026-07-09T07:04:33+08:00 | BFM-ZERO-STAGE1-STRICT-SAMPLING | Tightened the repo-owned BFM-Zero fallen-recovery workflow so Stage 1 random states must start free of raw ground/self contact, then settle until stable before fallen-state acceptance; Stage 1 now records passive-settle trajectories for all accepted states, Stage 3 renders tiled settle videos plus full-resolution failed settle videos, and the two goal-derived states remain on the original direct frame-extraction path. |
+| 2026-07-09T09:23:10+08:00 | BFM-ZERO-STRICT-RUN-A | Completed the first full strict-sampling fallen-recovery sweep as `fullstage1-bfm-zero-20260709a`: `98` accepted random states plus `2` unchanged goal-derived states, `92/100` Stage 2 successes, refreshed failure analysis, tiled Stage 1/Stage 2 videos, and paired full-resolution failed recovery plus failed passive-settle exports. |
 
 ## Files
 
@@ -36,7 +37,7 @@
 | `scripts/humanoid_gpt_*.py` | INIT | Humanoid-GPT translation, built-in evaluation, and deploy entrypoints. |
 | `scripts/bfm_zero_fallen_recovery_eval.py` | BFM-ZERO-STAGE1-STRICT-SAMPLING | Repo-owned BFM-Zero fallen-recovery CLI with strict Stage 1 random-state contact rejection, settle-until-stable acceptance, per-state Stage 1 settle logs, consolidated Stage 3 video export for Stage 1/Stage 2 trajectories, and preserved direct-extraction goal-derived states. |
 | `thirdparties/BFM-Zero-deploy/sshkeyboard.py` | BFM-ZERO-FALLEN-RECOVERY | Local PTY-friendly keyboard shim that lets the unmodified BFM-Zero deployer consume scripted `n` and `]` key events during automated stage replays. |
-| `BFM_ZERO_FALLEN_RECOVERY_FAILURE_ANALYSIS.md` | BFM-ZERO-FALLEN-RECOVERY | Tracked best-effort report that ranks initial-state features, joint outliers, and self-collision signatures associated with the failed recovery runs from the 100-run BFM-Zero sweep. |
+| `BFM_ZERO_FALLEN_RECOVERY_FAILURE_ANALYSIS.md` | BFM-ZERO-STRICT-RUN-A | Tracked best-effort report for the `fullstage1-bfm-zero-20260709a` strict-sampling sweep, including failed recovery and failed passive-settle video indexes. |
 | `thirdparties/run-sonic/GR00T-WholeBodyControl-main/verification/MANUAL_TEST_GUIDE.md` | HOST-SONIC-SPLIT | Manual SONIC/HoloMotion shared-simulator guide that documents the interactive `N/P`, `]`, and `T` control flow and support-release ordering. |
 | `thirdparties/GR00T-WholeBodyControl/gear_sonic_deploy/reference/benchmark/*` | SONIC-MANUAL-VIEWER-FLOW | SONIC's in-tree multi-motion reference library used by the simplified manual `N/P` browsing workflow. |
 | `.agents/skills/sonic-manual-sim2sim/*` | SONIC-MANUAL-BENCHMARK-SCENE | Repo skill for the simplified manual SONIC workflow: host interactive-window bridge on the benchmark-owned G1 29-DOF scene, interactive Docker SONIC, and in-tree `reference/benchmark` motion browsing. |
@@ -64,8 +65,8 @@
 | `logs/isaac-urdf-smoke/*` | INIT | Isaac URDF smoke outputs. |
 | `logs/isaac-usd-smoke/*` | INIT | Isaac USD smoke outputs. |
 | `logs/quick_unitree_sdk2py/*` | INIT | Quick Unitree SDK2 Python smoke outputs. |
-| `logs/bfm-zero-fallen-recovery/*` | BFM-ZERO-FALLEN-RECOVERY | Stage 1 initial-state manifests and `.npz` states, Stage 2 per-run trajectory logs and summaries, plus stop-policy investigations for BFM-Zero fallen-recovery replays. |
-| `artifacts/bfm-zero-fallen-recovery/*` | BFM-ZERO-FALLEN-RECOVERY | Stage 3 fallen-recovery metrics archives, MPJPE and latent-cosine plots, base-height plots, the 10x10 tiled replay video, failure-only 1080p replay exports, and machine-readable failure-analysis outputs generated from Stage 2 logs. |
+| `logs/bfm-zero-fallen-recovery/*` | BFM-ZERO-STRICT-RUN-A | Stage 1 manifests, settled state files, and per-state passive-settle trajectories plus Stage 2 per-run replay logs and summaries for strict-sampling fallen-recovery sweeps. |
+| `artifacts/bfm-zero-fallen-recovery/*` | BFM-ZERO-STRICT-RUN-A | Stage 3 metrics, plots, the 10x10 tiled replay video, the 10x10 tiled Stage 1 passive-settle video, full-resolution failed recovery and failed passive-settle videos, and machine-readable failure-analysis outputs for strict-sampling sweeps. |
 
 ## Skills
 
