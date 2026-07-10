@@ -26,6 +26,20 @@ BFM_ZERO_VENV_PYTHON = BFM_ZERO_TRAIN_ROOT / ".venv" / "bin" / "python"
 DEFAULT_FALLEN_Z_M = 0.45
 DEFAULT_RECOVERY_Z_M = 0.75
 DEFAULT_HORIZON_S = 4.0
+DEFAULT_INDUCED_HORIZON_S = 8.0
+DEFAULT_INVALID_ROOT_Z_MIN_M = -0.1
+DEFAULT_INVALID_ROOT_Z_MAX_M = 1.5
+DEFAULT_WRENCH_FORCE_MIN_N = 600.0
+DEFAULT_WRENCH_FORCE_MAX_N = 1800.0
+DEFAULT_WRENCH_TORQUE_MIN_NM = 200.0
+DEFAULT_WRENCH_TORQUE_MAX_NM = 600.0
+DEFAULT_WRENCH_DURATION_S = 0.5
+DEFAULT_LINEAR_VELOCITY_MIN_MPS = 3.0
+DEFAULT_LINEAR_VELOCITY_MAX_MPS = 6.0
+DEFAULT_ANGULAR_VELOCITY_MIN_RPS = 4.0
+DEFAULT_ANGULAR_VELOCITY_MAX_RPS = 8.0
+DEFAULT_LINEAR_VELOCITY_UP_COS_MIN = -0.8
+DEFAULT_LINEAR_VELOCITY_UP_COS_MAX = 0.0
 DEFAULT_GOAL_KEY = "dance1_subject3_505"
 DEFAULT_FALL_GOALS = [
     "fallAndGetUp1_subject4_2230",
@@ -123,10 +137,14 @@ def runtime() -> SimpleNamespace:
         quat_rotate_inverse,
         quat_to_tan_norm,
     )
+    from sim_env.utils.disturbance import DisturbanceController
+    from sim_env.utils.elastic_band import ElasticBand
     from sim_env.utils.simulation_bridge import SimulationBridge
     from utils.strings import resolve_matching_names_values
 
     _RUNTIME = SimpleNamespace(
+        DisturbanceController=DisturbanceController,
+        ElasticBand=ElasticBand,
         imageio=imageio,
         joblib=joblib,
         matplotlib=matplotlib,
@@ -865,6 +883,7 @@ def build_renderer(rt: SimpleNamespace, model: Any, width: int, height: int, pel
     model.vis.global_.offheight = max(int(model.vis.global_.offheight), int(height))
     renderer = rt.mujoco.Renderer(model, width=width, height=height)
     camera = rt.mujoco.MjvCamera()
+    rt.mujoco.mjv_defaultCamera(camera)
     camera.type = rt.mujoco.mjtCamera.mjCAMERA_TRACKING
     camera.trackbodyid = pelvis_body_id
     camera.distance = 2.75
@@ -873,10 +892,12 @@ def build_renderer(rt: SimpleNamespace, model: Any, width: int, height: int, pel
     return renderer, camera
 
 
-def render_frame(rt: SimpleNamespace, renderer: Any, camera: Any, model: Any, data: Any, qpos: Any) -> Any:
+def render_frame(rt: SimpleNamespace, renderer: Any, camera: Any, model: Any, data: Any, pelvis_body_id: int, qpos: Any) -> Any:
     data.qpos[:] = qpos
     data.qvel[:] = 0.0
     rt.mujoco.mj_forward(model, data)
+    # Seed tracking-camera lookat from the current pelvis pose so frame 0 starts centered on the robot.
+    camera.lookat[:] = data.xpos[pelvis_body_id]
     renderer.update_scene(data, camera=camera)
     return renderer.render().copy()
 
@@ -887,7 +908,7 @@ def write_plot(rt: SimpleNamespace, curves: Any, time_s: Any, title: str, ylabel
     fig, ax = rt.plt.subplots(figsize=(12, 6))
     for curve in curves:
         ax.plot(time_s, curve, color="#1f77b4", alpha=0.12, linewidth=1.0)
-    ax.plot(time_s, curves.mean(axis=0), color="#111111", linewidth=2.5)
+    ax.plot(time_s, rt.np.nanmean(curves, axis=0), color="#111111", linewidth=2.5)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
@@ -972,7 +993,56 @@ def load_stage_state_npz(path: Path) -> tuple[Any, Any, float]:
     return data["qpos"], data["qvel"], float(data["root_z"])
 
 
-def write_runtime_configs(run_dir: Path, low_state_port: int, low_cmd_port: int, disable_elastic_band: bool) -> tuple[Path, Path]:
+def disturbance_config_from_args(
+    args: argparse.Namespace,
+    command_path: Path,
+    status_path: Path,
+    *,
+    seed: int,
+    method_override: str | None = None,
+    scale_multiplier: float | None = None,
+) -> dict[str, Any]:
+    method = method_override or args.disturbance_method_override
+    scale = float(args.disturbance_scale_multiplier if scale_multiplier is None else scale_multiplier)
+    return {
+        "ENABLED": True,
+        "COMMAND_FILE": str(command_path),
+        "STATUS_FILE": str(status_path),
+        "TRIGGER_KEY": "f",
+        "METHOD_OVERRIDE": method,
+        "SCALE_MULTIPLIER": scale,
+        "RNG_SEED": int(seed),
+        "WRENCH_FORCE_MIN_N": float(args.wrench_force_min_n),
+        "WRENCH_FORCE_MAX_N": float(args.wrench_force_max_n),
+        "WRENCH_TORQUE_MIN_NM": float(args.wrench_torque_min_nm),
+        "WRENCH_TORQUE_MAX_NM": float(args.wrench_torque_max_nm),
+        "WRENCH_DURATION_S": float(args.wrench_duration_s),
+        "LINEAR_VELOCITY_MIN_MPS": float(args.linear_velocity_min_mps),
+        "LINEAR_VELOCITY_MAX_MPS": float(args.linear_velocity_max_mps),
+        "ANGULAR_VELOCITY_MIN_RPS": float(args.angular_velocity_min_rps),
+        "ANGULAR_VELOCITY_MAX_RPS": float(args.angular_velocity_max_rps),
+        "LINEAR_VELOCITY_UP_COS_MIN": float(DEFAULT_LINEAR_VELOCITY_UP_COS_MIN),
+        "LINEAR_VELOCITY_UP_COS_MAX": float(DEFAULT_LINEAR_VELOCITY_UP_COS_MAX),
+        "STATUS_WRITE_INTERVAL_S": 0.1,
+        "POST_START_MIN_WAIT_S": float(args.post_start_min_wait_s),
+        "STATIC_DWELL_S": float(args.stable_dwell_s),
+        "STATIC_ROOT_SPEED_MPS": float(args.stable_root_speed_mps),
+        "STATIC_ANG_SPEED_RPS": float(args.stable_ang_speed_rps),
+        "STATIC_JOINT_SPEED_RMS": float(args.stable_joint_speed_rms),
+        "STATIC_ROOT_SPAN_M": float(args.stable_root_span_m),
+    }
+
+
+def write_runtime_configs(
+    run_dir: Path,
+    low_state_port: int,
+    low_cmd_port: int,
+    *,
+    disable_elastic_band: bool,
+    disturbance_config: dict[str, Any] | None = None,
+    elastic_band_initial_length_steps: int = 0,
+    auto_release_on_first_lowcmd: bool = False,
+) -> tuple[Path, Path]:
     robot_config = load_yaml(BFM_ZERO_DEPLOY_ROOT / "config" / "robot" / "g1.yaml")
     scene_config = load_yaml(BFM_ZERO_DEPLOY_ROOT / "config" / "scene" / "g1_29dof.yaml")
     robot_scene = Path(str(scene_config["ROBOT_SCENE"]))
@@ -983,11 +1053,43 @@ def write_runtime_configs(run_dir: Path, low_state_port: int, low_cmd_port: int,
     robot_config["USE_JOYSTICK"] = False
     if disable_elastic_band:
         scene_config["ENABLE_ELASTIC_BAND"] = False
+    scene_config["ELASTIC_BAND_INITIAL_LENGTH_STEPS"] = int(elastic_band_initial_length_steps)
+    scene_config["ELASTIC_BAND_AUTO_RELEASE_ON_FIRST_LOWCMD"] = bool(auto_release_on_first_lowcmd)
+    if disturbance_config is not None:
+        scene_config["DISTURBANCE_CONFIG"] = disturbance_config
     robot_config_path = run_dir / "robot_runtime.yaml"
     scene_config_path = run_dir / "scene_runtime.yaml"
     write_yaml(robot_config_path, robot_config)
     write_yaml(scene_config_path, scene_config)
     return robot_config_path, scene_config_path
+
+
+def write_keyboard_event_request(command_path: Path, request_id: int, key: str = "f") -> None:
+    write_json(
+        command_path,
+        {
+            "created_at": now_iso(),
+            "request_id": int(request_id),
+            "event": "keyboard",
+            "key": key,
+            "source": "stage2_orchestrator",
+        },
+    )
+
+
+def wait_for_status_value(status_path: Path, key: str, expected: Any, timeout_s: float) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_s
+    last_payload: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        if status_path.exists():
+            try:
+                last_payload = load_json(status_path)
+            except json.JSONDecodeError:
+                last_payload = {}
+            if last_payload.get(key) == expected:
+                return last_payload
+        time.sleep(0.1)
+    raise TimeoutError(f"Timed out waiting for status {key}={expected!r}: {status_path}")
 
 
 def selected_goal_order() -> list[str]:
@@ -1058,6 +1160,357 @@ def launch_sim_capture(
     proc = ManagedProcess(cmd, REPO_ROOT, run_dir / "simulator_stdout.log", env=env, use_pty=False)
     proc.start()
     return proc
+
+
+def synthetic_source_state_from_trajectory(
+    run_dir: Path,
+    trajectory_path: Path,
+    run_idx: int,
+    goal_key: str,
+) -> dict[str, Any]:
+    rt = runtime()
+    traj = rt.np.load(trajectory_path)
+    qpos0 = rt.np.asarray(traj["qpos"][0], dtype=rt.np.float32)
+    qvel0 = rt.np.asarray(traj["qvel"][0], dtype=rt.np.float32)
+    root_z0 = float(rt.np.asarray(traj["root_z"], dtype=rt.np.float32)[0])
+    state_id = f"induced_state_{run_idx:03d}"
+    state_path = run_dir / f"{state_id}.npz"
+    write_stage_state_npz(state_path, qpos0, qvel0, root_z0)
+    return {
+        "state_id": state_id,
+        "index": run_idx,
+        "source": "sim-induced",
+        "goal_key": goal_key,
+        "root_z_m": root_z0,
+        "state_path": repo_rel(state_path),
+        "settle_trajectory_path": None,
+    }
+
+
+def run_stage2_replay(args: argparse.Namespace, manifest: dict[str, Any], layout: EvalLayout) -> dict[str, Any]:
+    stage2_dir = layout.stage2_dir
+    stage2_runs_dir = stage2_dir / "runs"
+    stage2_runs_dir.mkdir(parents=True, exist_ok=True)
+    states: list[dict[str, Any]] = list(manifest["states"])
+    if not states:
+        raise ValueError("Stage 1 manifest has no states")
+
+    run_summaries: list[dict[str, Any]] = []
+    success_count = 0
+
+    for run_idx, state in enumerate(states):
+        run_dir = stage2_runs_dir / f"run_{run_idx:03d}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        ready_file = run_dir / "sim_ready.json"
+        start_flag = run_dir / "start_eval.flag"
+        done_file = run_dir / "eval_done.json"
+        trajectory_path = run_dir / "trajectory.npz"
+        summary_path = run_dir / "summary.json"
+        state_path = REPO_ROOT / str(state["state_path"])
+        low_state_port = args.port_base + run_idx * 2
+        low_cmd_port = args.port_base + run_idx * 2 + 1
+        robot_config_path, scene_config_path = write_runtime_configs(
+            run_dir,
+            low_state_port,
+            low_cmd_port,
+            disable_elastic_band=True,
+        )
+
+        sim = launch_sim_capture(
+            run_dir,
+            "replay",
+            robot_config_path,
+            scene_config_path,
+            [
+                "--ready-file",
+                str(ready_file),
+                "--start-flag",
+                str(start_flag),
+                "--done-file",
+                str(done_file),
+                "--summary-path",
+                str(summary_path),
+                "--trajectory-path",
+                str(trajectory_path),
+                "--initial-state",
+                str(state_path),
+                "--fallen-z",
+                f"{args.fallen_z:.6f}",
+                "--recovery-z",
+                f"{args.recovery_z:.6f}",
+                "--horizon-s",
+                f"{args.horizon_s:.6f}",
+                "--goal-key",
+                args.goal_key,
+                "--source-state-id",
+                str(state["state_id"]),
+            ],
+        )
+        deployer: ManagedProcess | None = None
+        try:
+            wait_for_path(ready_file, 10.0, "simulator ready file")
+            deployer = launch_deployer(run_dir, robot_config_path, args.policy_ready_timeout_s)
+            goal_index = advance_policy_to_goal(deployer, args.goal_key, args.policy_ready_timeout_s)
+            touch(start_flag)
+            deployer.send("]")
+            deployer.wait_for_marker(f"Switch to goal={args.goal_key}", args.policy_ready_timeout_s)
+            wait_for_path(done_file, args.horizon_s + 20.0, f"stage2 done file for run {run_idx}")
+        finally:
+            if deployer is not None:
+                deployer.terminate()
+            sim.terminate()
+
+        run_summary = load_json(summary_path)
+        run_summary["goal_selection_index"] = goal_index
+        run_summary["source_state"] = state
+        run_summary["trajectory_path"] = repo_rel(trajectory_path)
+        run_summary["summary_path"] = repo_rel(summary_path)
+        run_summary["simulator_log"] = repo_rel(run_dir / "simulator_stdout.log")
+        run_summary["deployer_log"] = repo_rel(run_dir / "deployer_stdout.log")
+        write_json(summary_path, run_summary)
+        run_summaries.append(run_summary)
+        success_count += int(bool(run_summary["success"]))
+
+    return {
+        "run_id": str(manifest["run_id"]),
+        "created_at": now_iso(),
+        "stage": "stage2",
+        "mode": "replay_saved_state",
+        "stage1_manifest": repo_rel(Path(args.stage1_manifest)),
+        "goal_key": args.goal_key,
+        "seed": int(manifest["seed"]),
+        "fallen_z_threshold_m": args.fallen_z,
+        "recovery_z_threshold_m": args.recovery_z,
+        "horizon_s": args.horizon_s,
+        "num_runs": len(run_summaries),
+        "success_count": success_count,
+        "success_rate": float(success_count / len(run_summaries)),
+        "run_summaries": [repo_rel(stage2_runs_dir / f"run_{idx:03d}" / "summary.json") for idx in range(len(run_summaries))],
+    }
+
+
+def run_induced_attempt(
+    args: argparse.Namespace,
+    run_dir: Path,
+    run_idx: int,
+    attempt_idx: int,
+    *,
+    method_override: str | None = None,
+    scale_multiplier: float | None = None,
+) -> dict[str, Any]:
+    attempt_dir = run_dir / "attempts" / f"attempt_{attempt_idx:03d}"
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    ready_file = attempt_dir / "sim_ready.json"
+    start_flag = attempt_dir / "start_eval.flag"
+    done_file = attempt_dir / "eval_done.json"
+    summary_path = attempt_dir / "summary.json"
+    trajectory_path = attempt_dir / "trajectory.npz"
+    command_path = attempt_dir / "sim_command.json"
+    status_path = attempt_dir / "sim_status.json"
+    attempt_slot = run_idx * max(int(args.max_attempts_per_run), 1) + attempt_idx
+    low_state_port = args.port_base + attempt_slot * 2
+    low_cmd_port = args.port_base + attempt_slot * 2 + 1
+    attempt_seed = int(args.seed + run_idx * 1000 + attempt_idx)
+    disturbance_config = disturbance_config_from_args(
+        args,
+        command_path,
+        status_path,
+        seed=attempt_seed,
+        method_override=method_override,
+        scale_multiplier=scale_multiplier,
+    )
+    robot_config_path, scene_config_path = write_runtime_configs(
+        attempt_dir,
+        low_state_port,
+        low_cmd_port,
+        disable_elastic_band=False,
+        disturbance_config=disturbance_config,
+        elastic_band_initial_length_steps=3,
+        auto_release_on_first_lowcmd=True,
+    )
+    sim = launch_sim_capture(
+        attempt_dir,
+        "induce",
+        robot_config_path,
+        scene_config_path,
+        [
+            "--ready-file",
+            str(ready_file),
+            "--start-flag",
+            str(start_flag),
+            "--done-file",
+            str(done_file),
+            "--summary-path",
+            str(summary_path),
+            "--trajectory-path",
+            str(trajectory_path),
+            "--fallen-z",
+            f"{args.fallen_z:.6f}",
+            "--recovery-z",
+            f"{args.recovery_z:.6f}",
+            "--horizon-s",
+            f"{args.horizon_s:.6f}",
+            "--goal-key",
+            args.goal_key,
+            "--source-state-id",
+            f"induced_run_{run_idx:03d}",
+            "--timeout-s",
+            f"{args.static_ready_timeout_s:.6f}",
+        ],
+    )
+    deployer: ManagedProcess | None = None
+    try:
+        wait_for_path(ready_file, 10.0, "simulator ready file")
+        deployer = launch_deployer(attempt_dir, robot_config_path, args.policy_ready_timeout_s)
+        goal_index = advance_policy_to_goal(deployer, args.goal_key, args.policy_ready_timeout_s)
+        deployer.send("]")
+        deployer.wait_for_marker(f"Switch to goal={args.goal_key}", args.policy_ready_timeout_s)
+        touch(start_flag)
+        wait_for_status_value(status_path, "ready_for_disturbance", True, args.static_ready_timeout_s)
+        write_keyboard_event_request(command_path, 1, "f")
+        wait_for_path(done_file, args.horizon_s + args.static_ready_timeout_s + 20.0, f"stage2 done file for run {run_idx} attempt {attempt_idx}")
+    finally:
+        if deployer is not None:
+            deployer.terminate()
+        sim.terminate()
+
+    run_summary = load_json(summary_path)
+    run_summary["goal_selection_index"] = goal_index
+    run_summary["attempt_index"] = attempt_idx
+    run_summary["attempt_seed"] = attempt_seed
+    run_summary["trajectory_path"] = repo_rel(trajectory_path)
+    run_summary["summary_path"] = repo_rel(summary_path)
+    run_summary["simulator_log"] = repo_rel(attempt_dir / "simulator_stdout.log")
+    run_summary["deployer_log"] = repo_rel(attempt_dir / "deployer_stdout.log")
+    write_json(summary_path, run_summary)
+    return run_summary
+
+
+def run_stage2_induced(
+    args: argparse.Namespace,
+    layout: EvalLayout,
+    *,
+    method_override: str | None = None,
+    scale_multiplier: float | None = None,
+    require_accepted_runs: bool = True,
+) -> dict[str, Any]:
+    stage2_dir = layout.stage2_dir
+    stage2_runs_dir = stage2_dir / "runs"
+    stage2_runs_dir.mkdir(parents=True, exist_ok=True)
+    requested_num_runs = int(args.num_runs)
+    if requested_num_runs <= 0:
+        raise ValueError("--num-runs must be positive in induced-fall mode")
+
+    run_summaries: list[dict[str, Any]] = []
+    success_count = 0
+    perturbation_success_count = 0
+
+    for run_idx in range(requested_num_runs):
+        if method_override is not None:
+            scheduled_method = method_override
+        elif args.disturbance_method_override != "mixed":
+            scheduled_method = args.disturbance_method_override
+        else:
+            scheduled_method = "wrench" if run_idx % 2 == 0 else "velocity_delta"
+        run_dir = stage2_runs_dir / f"run_{run_idx:03d}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        accepted_summary: dict[str, Any] | None = None
+        attempt_summary_paths: list[str] = []
+
+        for attempt_idx in range(int(args.max_attempts_per_run)):
+            try:
+                attempt_summary = run_induced_attempt(
+                    args,
+                    run_dir,
+                    run_idx,
+                    attempt_idx,
+                    method_override=scheduled_method,
+                    scale_multiplier=scale_multiplier,
+                )
+                attempt_summary_paths.append(str(attempt_summary["summary_path"]))
+            except Exception as exc:
+                error_path = run_dir / "attempts" / f"attempt_{attempt_idx:03d}" / "orchestrator_error.json"
+                write_json(
+                    error_path,
+                    {
+                        "created_at": now_iso(),
+                        "run_index": run_idx,
+                        "attempt_index": attempt_idx,
+                        "error": str(exc),
+                    },
+                )
+                attempt_summary_paths.append(repo_rel(error_path))
+                attempt_summary = {
+                    "perturbation_success": False,
+                    "success": False,
+                    "error": str(exc),
+                    "summary_path": repo_rel(error_path),
+                }
+
+            if bool(attempt_summary.get("perturbation_success")):
+                accepted_summary = dict(attempt_summary)
+                perturbation_success_count += 1
+                break
+            if not require_accepted_runs:
+                accepted_summary = dict(attempt_summary)
+                break
+
+        if accepted_summary is None:
+            raise RuntimeError(
+                f"Run {run_idx} failed to produce an accepted perturbation within {args.max_attempts_per_run} attempts"
+            )
+
+        trajectory_rel = accepted_summary.get("trajectory_path")
+        trajectory_path = REPO_ROOT / str(trajectory_rel) if trajectory_rel else None
+        if trajectory_path is not None and trajectory_path.exists():
+            source_state = synthetic_source_state_from_trajectory(run_dir, trajectory_path, run_idx, args.goal_key)
+        else:
+            source_state = {
+                "state_id": f"induced_state_{run_idx:03d}",
+                "index": run_idx,
+                "source": "sim-induced",
+                "goal_key": args.goal_key,
+                "root_z_m": float("nan"),
+                "state_path": None,
+                "settle_trajectory_path": None,
+            }
+        final_summary = dict(accepted_summary)
+        final_summary["source_state"] = source_state
+        final_summary["attempt_count"] = 1 + int(final_summary.get("attempt_index", 0))
+        final_summary["attempt_summary_paths"] = attempt_summary_paths
+        final_summary["scheduled_disturbance_method"] = scheduled_method
+        final_summary["summary_path"] = repo_rel(run_dir / "summary.json")
+        write_json(run_dir / "summary.json", final_summary)
+        run_summaries.append(final_summary)
+        success_count += int(bool(final_summary["success"]))
+
+    summary: dict[str, Any] = {
+        "run_id": layout.run_id,
+        "created_at": now_iso(),
+        "stage": "stage2",
+        "mode": "induce_fall_in_simulator",
+        "goal_key": args.goal_key,
+        "seed": int(args.seed),
+        "fallen_z_threshold_m": args.fallen_z,
+        "recovery_z_threshold_m": args.recovery_z,
+        "horizon_s": args.horizon_s,
+        "num_runs": len(run_summaries),
+        "requested_num_runs": requested_num_runs,
+        "accepted_num_runs": len(run_summaries),
+        "success_count": success_count,
+        "success_rate": float(success_count / len(run_summaries)),
+        "perturbation_success_count": perturbation_success_count,
+        "run_summaries": [repo_rel(stage2_runs_dir / f"run_{idx:03d}" / "summary.json") for idx in range(len(run_summaries))],
+    }
+    if method_override is not None:
+        summary["disturbance_method_override"] = method_override
+    elif args.disturbance_method_override == "mixed":
+        summary["disturbance_method_schedule"] = "alternating_wrench_velocity_delta"
+    else:
+        summary["disturbance_method_override"] = args.disturbance_method_override
+    if scale_multiplier is not None:
+        summary["disturbance_scale_multiplier"] = float(scale_multiplier)
+    return summary
 
 
 def try_direct_goal_state(
@@ -1305,112 +1758,31 @@ def stage1(args: argparse.Namespace) -> int:
 
 
 def stage2(args: argparse.Namespace) -> int:
-    manifest = load_json(Path(args.stage1_manifest))
-    run_id = str(manifest["run_id"])
-    layout = build_layout(run_id)
-    stage2_dir = layout.stage2_dir
-    stage2_runs_dir = stage2_dir / "runs"
-    stage2_runs_dir.mkdir(parents=True, exist_ok=True)
-    states: list[dict[str, Any]] = list(manifest["states"])
-    if not states:
-        raise ValueError("Stage 1 manifest has no states")
+    if args.induce_fall_in_simulator:
+        if float(args.horizon_s) == DEFAULT_HORIZON_S:
+            args.horizon_s = DEFAULT_INDUCED_HORIZON_S
+        run_id = args.run_id or f"{now_stamp()}_stage2_induce_seed{args.seed}"
+        layout = build_layout(run_id)
+        summary = run_stage2_induced(args, layout)
+    else:
+        if not args.stage1_manifest:
+            raise ValueError("--stage1-manifest is required unless --induce-fall-in-simulator is enabled")
+        manifest = load_json(Path(args.stage1_manifest))
+        layout = build_layout(str(manifest["run_id"]))
+        summary = run_stage2_replay(args, manifest, layout)
 
-    run_summaries: list[dict[str, Any]] = []
-    success_count = 0
-
-    for run_idx, state in enumerate(states):
-        run_dir = stage2_runs_dir / f"run_{run_idx:03d}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        ready_file = run_dir / "sim_ready.json"
-        start_flag = run_dir / "start_eval.flag"
-        done_file = run_dir / "eval_done.json"
-        trajectory_path = run_dir / "trajectory.npz"
-        summary_path = run_dir / "summary.json"
-        state_path = REPO_ROOT / str(state["state_path"])
-        low_state_port = args.port_base + run_idx * 2
-        low_cmd_port = args.port_base + run_idx * 2 + 1
-        robot_config_path, scene_config_path = write_runtime_configs(run_dir, low_state_port, low_cmd_port, True)
-
-        sim = launch_sim_capture(
-            run_dir,
-            "replay",
-            robot_config_path,
-            scene_config_path,
-            [
-                "--ready-file",
-                str(ready_file),
-                "--start-flag",
-                str(start_flag),
-                "--done-file",
-                str(done_file),
-                "--summary-path",
-                str(summary_path),
-                "--trajectory-path",
-                str(trajectory_path),
-                "--initial-state",
-                str(state_path),
-                "--fallen-z",
-                f"{args.fallen_z:.6f}",
-                "--recovery-z",
-                f"{args.recovery_z:.6f}",
-                "--horizon-s",
-                f"{args.horizon_s:.6f}",
-                "--goal-key",
-                args.goal_key,
-                "--source-state-id",
-                str(state["state_id"]),
-            ],
-        )
-        deployer: ManagedProcess | None = None
-        try:
-            wait_for_path(ready_file, 10.0, "simulator ready file")
-            deployer = launch_deployer(run_dir, robot_config_path, args.policy_ready_timeout_s)
-            goal_index = advance_policy_to_goal(deployer, args.goal_key, args.policy_ready_timeout_s)
-            touch(start_flag)
-            deployer.send("]")
-            deployer.wait_for_marker(f"Switch to goal={args.goal_key}", args.policy_ready_timeout_s)
-            wait_for_path(done_file, args.horizon_s + 20.0, f"stage2 done file for run {run_idx}")
-        finally:
-            if deployer is not None:
-                deployer.terminate()
-            sim.terminate()
-
-        run_summary = load_json(summary_path)
-        run_summary["goal_selection_index"] = goal_index
-        run_summary["source_state"] = state
-        run_summary["trajectory_path"] = repo_rel(trajectory_path)
-        run_summary["summary_path"] = repo_rel(summary_path)
-        run_summary["simulator_log"] = repo_rel(run_dir / "simulator_stdout.log")
-        run_summary["deployer_log"] = repo_rel(run_dir / "deployer_stdout.log")
-        write_json(summary_path, run_summary)
-        run_summaries.append(run_summary)
-        success_count += int(bool(run_summary["success"]))
-
-    summary = {
-        "run_id": run_id,
-        "created_at": now_iso(),
-        "stage": "stage2",
-        "stage1_manifest": repo_rel(Path(args.stage1_manifest)),
-        "goal_key": args.goal_key,
-        "fallen_z_threshold_m": args.fallen_z,
-        "recovery_z_threshold_m": args.recovery_z,
-        "horizon_s": args.horizon_s,
-        "num_runs": len(run_summaries),
-        "success_count": success_count,
-        "success_rate": float(success_count / len(run_summaries)),
-        "run_summaries": [repo_rel(stage2_runs_dir / f"run_{idx:03d}" / "summary.json") for idx in range(len(run_summaries))],
-    }
-    summary_path = stage2_summary_path(stage2_dir)
+    summary_path = stage2_summary_path(layout.stage2_dir)
     write_json(summary_path, summary)
 
-    if len(run_summaries) == 100 and success_count == 0:
-        investigation_path = stage2_dir / "zero_success_investigation.json"
+    run_summaries = [load_json(REPO_ROOT / str(path)) for path in summary["run_summaries"]]
+    if len(run_summaries) == 100 and int(summary["success_count"]) == 0:
+        investigation_path = layout.stage2_dir / "zero_success_investigation.json"
         max_final_window = max(float(row.get("final_window_mean_root_z_m", float("nan"))) for row in run_summaries)
         max_any_height = max(float(row.get("max_root_z_m", float("nan"))) for row in run_summaries)
         write_json(
             investigation_path,
             {
-                "run_id": run_id,
+                "run_id": str(summary["run_id"]),
                 "created_at": now_iso(),
                 "reason": "all_100_runs_failed_recovery_threshold",
                 "goal_key": args.goal_key,
@@ -1425,7 +1797,69 @@ def stage2(args: argparse.Namespace) -> int:
             f"Readonly investigation written to {repo_rel(investigation_path)}."
         )
 
-    print(json.dumps({"stage2_summary": repo_rel(summary_path), "success_count": success_count, "num_runs": len(run_summaries)}, indent=2))
+    print(
+        json.dumps(
+            {
+                "stage2_summary": repo_rel(summary_path),
+                "mode": summary["mode"],
+                "success_count": int(summary["success_count"]),
+                "num_runs": int(summary["num_runs"]),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def tune_disturbance(args: argparse.Namespace) -> int:
+    base_run_id = args.run_id or f"{now_stamp()}_tune_seed{args.seed}"
+    base_layout = build_layout(base_run_id)
+    case_rows: list[dict[str, Any]] = []
+    original_max_attempts = int(args.max_attempts_per_run)
+    args.max_attempts_per_run = 1
+    try:
+        for method in ("wrench", "velocity_delta"):
+            for scale_multiplier in (1.0, 0.1):
+                case_run_id = f"{base_run_id}_{method}_{'nominal' if scale_multiplier == 1.0 else 'x0p1'}"
+                case_layout = build_layout(case_run_id)
+                case_summary = run_stage2_induced(
+                    args,
+                    case_layout,
+                    method_override=method,
+                    scale_multiplier=scale_multiplier,
+                    require_accepted_runs=False,
+                )
+                case_summary_path = stage2_summary_path(case_layout.stage2_dir)
+                write_json(case_summary_path, case_summary)
+                perturbation_success_rate = float(case_summary["perturbation_success_count"] / max(int(case_summary["num_runs"]), 1))
+                case_rows.append(
+                    {
+                        "method": method,
+                        "scale_multiplier": scale_multiplier,
+                        "num_runs": int(case_summary["num_runs"]),
+                        "perturbation_success_count": int(case_summary["perturbation_success_count"]),
+                        "perturbation_success_rate": perturbation_success_rate,
+                        "passes_0p1_gate": None if scale_multiplier != 0.1 else bool(perturbation_success_rate < args.tuning_gate_max_success_rate),
+                        "stage2_summary": repo_rel(case_summary_path),
+                    }
+                )
+    finally:
+        args.max_attempts_per_run = original_max_attempts
+
+    summary_path = base_layout.root_artifact_dir / "tuning_summary.json"
+    write_json(
+        summary_path,
+        {
+            "run_id": base_run_id,
+            "created_at": now_iso(),
+            "goal_key": args.goal_key,
+            "seed": int(args.seed),
+            "num_runs_per_case": int(args.num_runs),
+            "gate_threshold_success_rate": float(args.tuning_gate_max_success_rate),
+            "cases": case_rows,
+        },
+    )
+    print(json.dumps({"tuning_summary": repo_rel(summary_path), "cases": case_rows}, indent=2))
     return 0
 
 
@@ -1436,7 +1870,8 @@ def stage3(args: argparse.Namespace) -> int:
     run_id = str(summary["run_id"])
     layout = build_layout(run_id)
     stage3_dir = layout.stage3_dir
-    stage1_manifest = load_json(REPO_ROOT / str(summary["stage1_manifest"]))
+    stage1_manifest_rel = summary.get("stage1_manifest")
+    stage1_manifest = load_json(REPO_ROOT / str(stage1_manifest_rel)) if stage1_manifest_rel else None
 
     run_summary_paths = [REPO_ROOT / str(path) for path in summary["run_summaries"]]
     run_summaries = [load_json(path) for path in run_summary_paths]
@@ -1455,23 +1890,28 @@ def stage3(args: argparse.Namespace) -> int:
     latent_model = rt.load_model_from_checkpoint_dir(str(BFM_ZERO_DEPLOY_ROOT / "model" / "checkpoint"), device="cpu")
     latent_model.eval()
 
-    first_traj = rt.np.load(REPO_ROOT / str(run_summaries[0]["trajectory_path"]))
-    time_s = rt.np.asarray(first_traj["time_s"], dtype=rt.np.float32)
+    trajectories = [rt.np.load(REPO_ROOT / str(run_summary["trajectory_path"])) for run_summary in run_summaries]
+    time_vectors = [rt.np.asarray(traj["time_s"], dtype=rt.np.float32) for traj in trajectories]
+    max_steps = max(int(time_vec.shape[0]) for time_vec in time_vectors)
+    reference_idx = max(range(len(time_vectors)), key=lambda idx: int(time_vectors[idx].shape[0]))
+    time_s = time_vectors[reference_idx]
     num_runs = len(run_summaries)
-    rollout_steps = int(time_s.shape[0])
+    rollout_steps = int(max_steps)
 
-    mpjpe_mm = rt.np.zeros((num_runs, rollout_steps), dtype=rt.np.float32)
-    latent_cosine = rt.np.zeros((num_runs, rollout_steps), dtype=rt.np.float32)
-    root_z = rt.np.zeros((num_runs, rollout_steps), dtype=rt.np.float32)
+    mpjpe_mm = rt.np.full((num_runs, rollout_steps), rt.np.nan, dtype=rt.np.float32)
+    latent_cosine = rt.np.full((num_runs, rollout_steps), rt.np.nan, dtype=rt.np.float32)
+    root_z = rt.np.full((num_runs, rollout_steps), rt.np.nan, dtype=rt.np.float32)
     success = rt.np.zeros(num_runs, dtype=bool)
+    trajectory_lengths = rt.np.zeros(num_runs, dtype=rt.np.int32)
 
-    for run_idx, run_summary in enumerate(run_summaries):
-        traj = rt.np.load(REPO_ROOT / str(run_summary["trajectory_path"]))
+    for run_idx, (run_summary, traj) in enumerate(zip(run_summaries, trajectories)):
         qpos = rt.np.asarray(traj["qpos"], dtype=rt.np.float32)
         qvel = rt.np.asarray(traj["qvel"], dtype=rt.np.float32)
-        if qpos.shape[0] != rollout_steps:
-            raise ValueError(f"Run {run_idx} trajectory length mismatch: {qpos.shape[0]} vs {rollout_steps}")
-        for step_idx in range(rollout_steps):
+        run_steps = int(qpos.shape[0])
+        if qvel.shape[0] != run_steps:
+            raise ValueError(f"Run {run_idx} qvel length mismatch: {qvel.shape[0]} vs {run_steps}")
+        trajectory_lengths[run_idx] = run_steps
+        for step_idx in range(run_steps):
             data.qpos[:] = qpos[step_idx]
             data.qvel[:] = qvel[step_idx]
             rt.mujoco.mj_forward(model, data)
@@ -1492,7 +1932,15 @@ def stage3(args: argparse.Namespace) -> int:
         success[run_idx] = bool(run_summary["success"])
 
     metrics_path = stage3_dir / "metrics.npz"
-    rt.np.savez_compressed(metrics_path, time_s=time_s, mpjpe_mm=mpjpe_mm, latent_cosine=latent_cosine, root_z=root_z, success=success)
+    rt.np.savez_compressed(
+        metrics_path,
+        time_s=time_s,
+        mpjpe_mm=mpjpe_mm,
+        latent_cosine=latent_cosine,
+        root_z=root_z,
+        success=success,
+        trajectory_lengths=trajectory_lengths,
+    )
 
     success_rate = float(success.mean())
     title_suffix = (
@@ -1521,17 +1969,22 @@ def stage3(args: argparse.Namespace) -> int:
         tiled_video,
     )
     stage1_tiled_video = stage3_dir / "tiled_stage1_settle.mp4"
-    stage1_grid_rows, stage1_grid_cols, stage1_video_width, stage1_video_height = render_tiled_video_from_paths(
-        rt,
-        model,
-        data,
-        pelvis_body_id,
-        [REPO_ROOT / str(row["settle_trajectory_path"]) for row in stage1_manifest["states"]],
-        args.video_fps,
-        args.render_width,
-        args.render_height,
-        stage1_tiled_video,
-    )
+    stage1_grid_rows: int | None = None
+    stage1_grid_cols: int | None = None
+    stage1_video_width: int | None = None
+    stage1_video_height: int | None = None
+    if stage1_manifest is not None:
+        stage1_grid_rows, stage1_grid_cols, stage1_video_width, stage1_video_height = render_tiled_video_from_paths(
+            rt,
+            model,
+            data,
+            pelvis_body_id,
+            [REPO_ROOT / str(row["settle_trajectory_path"]) for row in stage1_manifest["states"]],
+            args.video_fps,
+            args.render_width,
+            args.render_height,
+            stage1_tiled_video,
+        )
 
     latent_min = float(rt.np.nanmin(latent_cosine))
     latent_max = float(rt.np.nanmax(latent_cosine))
@@ -1555,27 +2008,26 @@ def stage3(args: argparse.Namespace) -> int:
             "failed_videos_index.json",
             lambda run_name, state_id: f"{run_name}_{state_id}_1080p.mp4",
         )
-        failed_settle_index, failed_settle_videos = render_failed_video_group(
-            rt,
-            model,
-            data,
-            pelvis_body_id,
-            failed_runs,
-            lambda run_summary: REPO_ROOT / str(run_summary["source_state"]["settle_trajectory_path"]),
-            args.video_fps,
-            args.failed_render_width,
-            args.failed_render_height,
-            layout.stage3_dir,
-            "failed_settle_videos_index.json",
-            lambda run_name, state_id: f"{run_name}_{state_id}_settle_1080p.mp4",
-        )
+        if stage1_manifest is not None:
+            failed_settle_index, failed_settle_videos = render_failed_video_group(
+                rt,
+                model,
+                data,
+                pelvis_body_id,
+                failed_runs,
+                lambda run_summary: REPO_ROOT / str(run_summary["source_state"]["settle_trajectory_path"]),
+                args.video_fps,
+                args.failed_render_width,
+                args.failed_render_height,
+                layout.stage3_dir,
+                "failed_settle_videos_index.json",
+                lambda run_name, state_id: f"{run_name}_{state_id}_settle_1080p.mp4",
+            )
     summary_payload = {
         "run_id": run_id,
         "created_at": now_iso(),
         "stage": "stage3",
         "stage2_summary": repo_rel(stage2_summary_path(stage2_dir)),
-        "stage1_manifest": repo_rel(REPO_ROOT / str(summary["stage1_manifest"])),
-        "stage1_summary": repo_rel(stage1_summary_path((REPO_ROOT / str(summary["stage1_manifest"])).parent)),
         "num_runs": num_runs,
         "goal_key": summary["goal_key"],
         "seed": manifest_seed_from_stage2(summary),
@@ -1593,12 +2045,19 @@ def stage3(args: argparse.Namespace) -> int:
         "stage1_video_width": stage1_video_width,
         "stage1_video_height": stage1_video_height,
         "sanity": {
-            "mpjpe_finite": bool(rt.np.all(rt.np.isfinite(mpjpe_mm))),
-            "latent_cosine_finite": bool(rt.np.all(rt.np.isfinite(latent_cosine))),
+            "mpjpe_recorded_finite": bool(rt.np.all(rt.np.isfinite(mpjpe_mm[~rt.np.isnan(mpjpe_mm)]))),
+            "latent_cosine_recorded_finite": bool(rt.np.all(rt.np.isfinite(latent_cosine[~rt.np.isnan(latent_cosine)]))),
             "latent_cosine_in_range": bool(latent_min >= -1.0001 and latent_max <= 1.0001),
-            "root_z_finite": bool(rt.np.all(rt.np.isfinite(root_z))),
+            "root_z_recorded_finite": bool(rt.np.all(rt.np.isfinite(root_z[~rt.np.isnan(root_z)]))),
+            "variable_length_trajectories": bool(len({int(v) for v in trajectory_lengths.tolist()}) > 1),
             "full_grid_1920x1080": bool(num_runs == 100 and video_width == 1920 and video_height == 1080),
-            "full_stage1_grid_1920x1080": bool(num_runs == 100 and stage1_video_width == 1920 and stage1_video_height == 1080),
+            "full_stage1_grid_1920x1080": bool(
+                stage1_video_width is not None
+                and stage1_video_height is not None
+                and num_runs == 100
+                and stage1_video_width == 1920
+                and stage1_video_height == 1080
+            ),
         },
         "artifacts": {
             "metrics_npz": repo_rel(metrics_path),
@@ -1607,9 +2066,12 @@ def stage3(args: argparse.Namespace) -> int:
             "latent_plot": repo_rel(latent_plot),
             "base_height_plot": repo_rel(root_z_plot),
             "tiled_video": repo_rel(tiled_video),
-            "stage1_tiled_settle_video": repo_rel(stage1_tiled_video),
         },
     }
+    if stage1_manifest_rel:
+        summary_payload["stage1_manifest"] = repo_rel(REPO_ROOT / str(stage1_manifest_rel))
+        summary_payload["stage1_summary"] = repo_rel(stage1_summary_path((REPO_ROOT / str(stage1_manifest_rel)).parent))
+        summary_payload["artifacts"]["stage1_tiled_settle_video"] = repo_rel(stage1_tiled_video)
     if failed_recovery_index is not None:
         summary_payload["artifacts"]["failed_videos_index"] = repo_rel(failed_recovery_index)
         summary_payload["artifacts"]["failed_videos_1080p"] = failed_recovery_videos
@@ -1622,7 +2084,7 @@ def stage3(args: argparse.Namespace) -> int:
             {
                 "stage3_summary": repo_rel(stage3_summary_path(stage3_dir)),
                 "video": repo_rel(tiled_video),
-                "stage1_video": repo_rel(stage1_tiled_video),
+                "stage1_video": repo_rel(stage1_tiled_video) if stage1_manifest_rel else None,
             },
             indent=2,
         )
@@ -1631,17 +2093,26 @@ def stage3(args: argparse.Namespace) -> int:
 
 
 def manifest_seed_from_stage2(stage2_summary: dict[str, Any]) -> int:
-    manifest = load_json(REPO_ROOT / str(stage2_summary["stage1_manifest"]))
-    return int(manifest["seed"])
+    if stage2_summary.get("stage1_manifest"):
+        manifest = load_json(REPO_ROOT / str(stage2_summary["stage1_manifest"]))
+        return int(manifest["seed"])
+    return int(stage2_summary.get("seed", 0))
 
 
-def load_stage2_context(stage2_dir: Path) -> tuple[dict[str, Any], dict[str, Any], EvalLayout, list[dict[str, Any]], dict[str, dict[str, Any]]]:
+def load_stage2_context(stage2_dir: Path) -> tuple[dict[str, Any], dict[str, Any] | None, EvalLayout, list[dict[str, Any]], dict[str, dict[str, Any]]]:
     summary = load_json(stage2_summary_path(stage2_dir))
     run_id = str(summary["run_id"])
     layout = build_layout(run_id)
-    manifest = load_json(REPO_ROOT / str(summary["stage1_manifest"]))
     run_summaries = [load_json(REPO_ROOT / str(path)) for path in summary["run_summaries"]]
-    states_by_id = {str(row["state_id"]): row for row in manifest["states"]}
+    manifest = load_json(REPO_ROOT / str(summary["stage1_manifest"])) if summary.get("stage1_manifest") else None
+    if manifest is not None:
+        states_by_id = {str(row["state_id"]): row for row in manifest["states"]}
+    else:
+        states_by_id = {
+            str(row["source_state"]["state_id"]): dict(row["source_state"])
+            for row in run_summaries
+            if isinstance(row.get("source_state"), dict) and row["source_state"].get("state_id")
+        }
     return summary, manifest, layout, run_summaries, states_by_id
 
 
@@ -1770,6 +2241,7 @@ def render_video_from_qpos(
     data: Any,
     renderer: Any,
     camera: Any,
+    pelvis_body_id: int,
     qpos: Any,
     sample_indices: Any,
     fps: int,
@@ -1780,7 +2252,7 @@ def render_video_from_qpos(
     writer = rt.imageio.get_writer(output_path, fps=fps, codec="libx264", macro_block_size=None)
     try:
         for sample_idx in sample_indices:
-            frame = render_frame(rt, renderer, camera, model, data, qpos[int(sample_idx)])
+            frame = render_frame(rt, renderer, camera, model, data, pelvis_body_id, qpos[int(sample_idx)])
             writer.append_data(frame)
     finally:
         writer.close()
@@ -1810,7 +2282,7 @@ def render_tiled_video_from_paths(
             qpos = rt.np.asarray(traj["qpos"], dtype=rt.np.float32)
             sample_indices = rt.np.clip(rt.np.searchsorted(time_s, render_times, side="left"), 0, len(time_s) - 1)
             for frame_idx, sample_idx in enumerate(sample_indices):
-                frames[run_idx, frame_idx] = render_frame(rt, renderer, camera, model, data, qpos[int(sample_idx)])
+                frames[run_idx, frame_idx] = render_frame(rt, renderer, camera, model, data, pelvis_body_id, qpos[int(sample_idx)])
     finally:
         renderer.close()
     return tile_video(rt, frames, fps, output_path)
@@ -1842,7 +2314,7 @@ def render_failed_video_group(
             qpos = rt.np.asarray(traj["qpos"], dtype=rt.np.float32)
             render_times = rt.np.arange(0.0, float(time_s[-1]) + 1e-9, 1.0 / fps, dtype=rt.np.float32)
             render_indices = rt.np.clip(rt.np.searchsorted(time_s, render_times, side="left"), 0, len(time_s) - 1)
-            render_video_from_qpos(rt, model, data, renderer, camera, qpos, render_indices, fps, output_path)
+            render_video_from_qpos(rt, model, data, renderer, camera, pelvis_body_id, qpos, render_indices, fps, output_path)
             output_paths.append(repo_rel(output_path))
     finally:
         renderer.close()
@@ -2181,16 +2653,19 @@ def analyze_failures(args: argparse.Namespace) -> int:
             "## Failed Video Exports",
             "",
             f"- Tiled video: `{repo_rel(layout.stage3_dir / 'tiled_runs.mp4')}`",
-            f"- Stage 1 tiled passive-settle video: `{repo_rel(layout.stage3_dir / 'tiled_stage1_settle.mp4')}`",
+            f"- Stage 1 tiled passive-settle video: `{repo_rel(layout.stage3_dir / 'tiled_stage1_settle.mp4')}`" if summary.get("stage1_manifest") else "- Stage 1 tiled passive-settle video: not available for induced-fall runs",
             f"- Failed-video index: `{repo_rel(failed_video_index) if failed_video_index.exists() else 'not generated yet'}`",
-            f"- Failed settle-video index: `{repo_rel(failed_settle_video_index) if failed_settle_video_index.exists() else 'not generated yet'}`",
+            f"- Failed settle-video index: `{repo_rel(failed_settle_video_index) if failed_settle_video_index.exists() else 'not generated yet'}`" if summary.get("stage1_manifest") else "- Failed settle-video index: not available without Stage 1 settle trajectories",
             "",
             "Failed recovery videos:",
         ]
     )
     report_lines.extend([f"- `{path}`" for path in failed_video_paths] or ["- No failed-video exports were present when this report was generated."])
     report_lines.extend(["", "Failed passive-settle videos:"])
-    report_lines.extend([f"- `{path}`" for path in failed_settle_video_paths] or ["- No failed settle-video exports were present when this report was generated."])
+    if summary.get("stage1_manifest"):
+        report_lines.extend([f"- `{path}`" for path in failed_settle_video_paths] or ["- No failed settle-video exports were present when this report was generated."])
+    else:
+        report_lines.append("- No Stage 1 settle trajectories exist for induced-fall runs.")
 
     report_lines.extend(
         [
@@ -2319,7 +2794,8 @@ def sim_runner(args: argparse.Namespace) -> int:
     rt = runtime()
     robot_config = load_yaml(Path(args.robot_config))
     scene_config = load_yaml(Path(args.scene_config))
-    scene_config["ENABLE_ELASTIC_BAND"] = False
+    if args.mode == "replay":
+        scene_config["ENABLE_ELASTIC_BAND"] = False
     model = rt.mujoco.MjModel.from_xml_path(str(scene_config["ROBOT_SCENE"]))
     model.opt.timestep = float(scene_config["SIMULATE_DT"])
     data = rt.mujoco.MjData(model)
@@ -2332,6 +2808,18 @@ def sim_runner(args: argparse.Namespace) -> int:
 
     sim_bridge = rt.SimulationBridge(model, data, robot_config, scene_config)
     pelvis_body_id = model.body("pelvis").id
+    joint_qvel_ids = rt.np.asarray(sim_bridge.qvel_adrs, dtype=rt.np.int64)
+    disturbance_controller = rt.DisturbanceController(model, data, scene_config)
+    elastic_band = None
+    band_attached_link = None
+    elastic_band_auto_released = False
+    if scene_config.get("ENABLE_ELASTIC_BAND", False):
+        elastic_band = rt.ElasticBand()
+        elastic_band.length += 0.1 * int(scene_config.get("ELASTIC_BAND_INITIAL_LENGTH_STEPS", 0))
+        if "h1" in robot_config["ROBOT_TYPE"] or "g1" in robot_config["ROBOT_TYPE"]:
+            band_attached_link = model.body("torso_link").id
+        else:
+            band_attached_link = model.body("base_link").id
 
     ready_payload = {
         "created_at": now_iso(),
@@ -2345,69 +2833,263 @@ def sim_runner(args: argparse.Namespace) -> int:
     sim_dt = float(model.opt.timestep)
     next_step = time.perf_counter()
 
-    def sim_step() -> None:
+    def sim_step() -> tuple[bool, dict[str, Any] | None]:
+        nonlocal elastic_band_auto_released
         sim_bridge.publish_low_state()
+        if (
+            elastic_band is not None
+            and scene_config.get("ELASTIC_BAND_AUTO_RELEASE_ON_FIRST_LOWCMD", False)
+            and sim_bridge.has_received_command
+            and not elastic_band_auto_released
+        ):
+            elastic_band.enable = False
+        if band_attached_link is not None:
+            data.xfrc_applied[band_attached_link, :3] = 0.0
+        if elastic_band is not None and elastic_band.enable and band_attached_link is not None:
+            pos = data.xpos[band_attached_link]
+            lin_vel = data.cvel[band_attached_link, 3:6]
+            data.xfrc_applied[band_attached_link, :3] = elastic_band.Advance(pos, lin_vel)
+        triggered_now = disturbance_controller.step()
+        trigger_sample = None
+        if triggered_now:
+            trigger_sample = {
+                "qpos": data.qpos.copy(),
+                "qvel": data.qvel.copy(),
+                "root_z": float(data.xpos[pelvis_body_id, 2]),
+            }
         sim_bridge.compute_torques()
         data.ctrl[:] = sim_bridge.torques
         rt.mujoco.mj_step(model, data)
+        return triggered_now, trigger_sample
 
-    if args.mode != "replay":
-        raise ValueError(f"Unsupported sim runner mode {args.mode}")
     if not args.trajectory_path or not args.summary_path or not args.done_file:
-        raise ValueError("replay mode requires --trajectory-path, --summary-path, and --done-file")
+        raise ValueError(f"{args.mode} mode requires --trajectory-path, --summary-path, and --done-file")
 
-    steps = int(round(args.horizon_s / sim_dt))
-    record_count = steps + 1
-    qpos_log = rt.np.zeros((record_count, model.nq), dtype=rt.np.float32)
-    qvel_log = rt.np.zeros((record_count, model.nv), dtype=rt.np.float32)
-    root_z_log = rt.np.zeros(record_count, dtype=rt.np.float32)
-    time_log = rt.np.arange(record_count, dtype=rt.np.float32) * sim_dt
+    if args.mode == "replay":
+        steps = int(round(args.horizon_s / sim_dt))
+        record_count = steps + 1
+        qpos_log = rt.np.zeros((record_count, model.nq), dtype=rt.np.float32)
+        qvel_log = rt.np.zeros((record_count, model.nv), dtype=rt.np.float32)
+        root_z_log = rt.np.zeros(record_count, dtype=rt.np.float32)
+        time_log = rt.np.arange(record_count, dtype=rt.np.float32) * sim_dt
+        started = False
+        record_idx = 0
+        while True:
+            if not started and Path(args.start_flag).exists():
+                started = True
+                record_idx = 0
+            if started and record_idx < record_count:
+                qpos_log[record_idx] = data.qpos
+                qvel_log[record_idx] = data.qvel
+                root_z_log[record_idx] = float(data.xpos[pelvis_body_id, 2])
+                record_idx += 1
+                if record_idx >= record_count:
+                    break
+            sim_step()
+            next_step += sim_dt
+            time.sleep(max(0.0, next_step - time.perf_counter()))
+
+        trajectory_path = Path(args.trajectory_path)
+        trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+        rt.np.savez_compressed(
+            trajectory_path,
+            time_s=time_log,
+            qpos=qpos_log,
+            qvel=qvel_log,
+            root_z=root_z_log,
+        )
+        final_window_steps = max(1, int(round(0.5 / sim_dt)))
+        final_window_mean = float(root_z_log[-final_window_steps:].mean())
+        success = bool(final_window_mean > args.recovery_z)
+        write_json(
+            Path(args.summary_path),
+            {
+                "created_at": now_iso(),
+                "mode": "replay",
+                "goal_key": args.goal_key,
+                "source_state_id": args.source_state_id,
+                "trajectory_path": str(trajectory_path),
+                "fallen_z_threshold_m": args.fallen_z,
+                "recovery_z_threshold_m": args.recovery_z,
+                "horizon_s": args.horizon_s,
+                "sim_dt": sim_dt,
+                "steps": int(record_count),
+                "success": success,
+                "final_window_mean_root_z_m": final_window_mean,
+                "max_root_z_m": float(root_z_log.max()),
+            },
+        )
+        write_json(Path(args.done_file), {"created_at": now_iso(), "summary_path": str(args.summary_path)})
+        return 0
+
+    if args.mode != "induce":
+        raise ValueError(f"Unsupported sim runner mode {args.mode}")
+
+    disturbance_cfg = dict(scene_config.get("DISTURBANCE_CONFIG") or {})
+    static_dwell_s = float(disturbance_cfg.get("STATIC_DWELL_S", 0.25))
+    dwell_steps = max(1, int(round(static_dwell_s / sim_dt)))
+    history: deque[dict[str, Any]] = deque(maxlen=dwell_steps)
+    static_root_speed_mps = float(disturbance_cfg.get("STATIC_ROOT_SPEED_MPS", 0.15))
+    static_ang_speed_rps = float(disturbance_cfg.get("STATIC_ANG_SPEED_RPS", 0.75))
+    static_joint_speed_rms = float(disturbance_cfg.get("STATIC_JOINT_SPEED_RMS", 0.6))
+    static_root_span_m = float(disturbance_cfg.get("STATIC_ROOT_SPAN_M", 0.03))
+    post_start_min_wait_s = float(disturbance_cfg.get("POST_START_MIN_WAIT_S", 0.5))
+
     started = False
-    record_idx = 0
+    ready_for_disturbance = False
+    observation_started = False
+    perturbation_success = False
+    start_sim_time_s: float | None = None
+    observation_start_time_s: float | None = None
+    invalid_root_z_min_m = float(scene_config.get("INVALID_ROOT_Z_MIN_M", DEFAULT_INVALID_ROOT_Z_MIN_M))
+    invalid_root_z_max_m = float(scene_config.get("INVALID_ROOT_Z_MAX_M", DEFAULT_INVALID_ROOT_Z_MAX_M))
+    qpos_log: list[Any] = []
+    qvel_log: list[Any] = []
+    root_z_log: list[float] = []
+    time_log: list[float] = []
+    timeout_deadline_s: float | None = None
+    failure_reason = ""
+
     while True:
+        current_speed = speed_summary(rt, model, data, pelvis_body_id, joint_qvel_ids)
         if not started and Path(args.start_flag).exists():
             started = True
-            record_idx = 0
-        if started and record_idx < record_count:
-            qpos_log[record_idx] = data.qpos
-            qvel_log[record_idx] = data.qvel
-            root_z_log[record_idx] = float(data.xpos[pelvis_body_id, 2])
-            record_idx += 1
-            if record_idx >= record_count:
-                break
-        sim_step()
+            start_sim_time_s = float(data.time)
+            timeout_deadline_s = time.monotonic() + args.timeout_s
+            history.clear()
+
+        if started and not observation_started:
+            history.append(stability_sample(rt, data, pelvis_body_id, joint_qvel_ids))
+            enough_wait = start_sim_time_s is not None and float(data.time) - start_sim_time_s >= post_start_min_wait_s
+            ready_for_disturbance = bool(
+                sim_bridge.has_received_command
+                and enough_wait
+                and len(history) == dwell_steps
+                and history_is_stable(
+                    rt,
+                    history,
+                    static_root_speed_mps,
+                    static_ang_speed_rps,
+                    static_joint_speed_rms,
+                    static_root_span_m,
+                )
+            )
+        disturbance_controller.maybe_write_status(
+            {
+                "created_at": now_iso(),
+                "mode": args.mode,
+                "started": started,
+                "has_received_lowcmd": bool(sim_bridge.has_received_command),
+                "ready_for_disturbance": ready_for_disturbance,
+                "static_window_ok": ready_for_disturbance,
+                "root_lin_speed_mps": current_speed["root_lin_speed_mps"],
+                "root_ang_speed_rps": current_speed["root_ang_speed_rps"],
+                "joint_vel_rms": current_speed["joint_vel_rms"],
+                "perturbation_success": perturbation_success,
+            },
+            force=not started or ready_for_disturbance or observation_started,
+        )
+
+        if started and not observation_started and timeout_deadline_s is not None and time.monotonic() >= timeout_deadline_s:
+            failure_reason = "timed_out_waiting_for_disturbance"
+            break
+
+        triggered_now, trigger_sample = sim_step()
+        if not rt.np.all(rt.np.isfinite(data.qpos)) or not rt.np.all(rt.np.isfinite(data.qvel)):
+            failure_reason = "simulation_invalid"
+            break
+        if (
+            elastic_band is not None
+            and scene_config.get("ELASTIC_BAND_AUTO_RELEASE_ON_FIRST_LOWCMD", False)
+            and sim_bridge.has_received_command
+            and not elastic_band_auto_released
+        ):
+            elastic_band.enable = False
+            elastic_band_auto_released = True
         next_step += sim_dt
         time.sleep(max(0.0, next_step - time.perf_counter()))
 
+        if triggered_now and not observation_started and trigger_sample is not None:
+            observation_started = True
+            observation_start_time_s = float(disturbance_controller.last_event.sim_time_s if disturbance_controller.last_event else data.time)
+            qpos_log.append(trigger_sample["qpos"])
+            qvel_log.append(trigger_sample["qvel"])
+            root_z_log.append(float(trigger_sample["root_z"]))
+            time_log.append(0.0)
+            perturbation_success = bool(trigger_sample["root_z"] < args.fallen_z)
+
+        if observation_started and observation_start_time_s is not None:
+            elapsed_s = float(data.time) - observation_start_time_s
+            qpos_log.append(data.qpos.copy())
+            qvel_log.append(data.qvel.copy())
+            root_z_value = float(data.xpos[pelvis_body_id, 2])
+            root_z_log.append(root_z_value)
+            time_log.append(max(0.0, elapsed_s))
+            if elapsed_s <= 1.0 + 1e-9 and root_z_value < args.fallen_z:
+                perturbation_success = True
+            if root_z_value < invalid_root_z_min_m or root_z_value > invalid_root_z_max_m:
+                failure_reason = "simulation_unrealistic_root_height"
+                break
+            if elapsed_s >= args.horizon_s - 1e-9:
+                break
+
     trajectory_path = Path(args.trajectory_path)
-    trajectory_path.parent.mkdir(parents=True, exist_ok=True)
-    rt.np.savez_compressed(
-        trajectory_path,
-        time_s=time_log,
-        qpos=qpos_log,
-        qvel=qvel_log,
-        root_z=root_z_log,
-    )
-    final_window_steps = max(1, int(round(0.5 / sim_dt)))
-    final_window_mean = float(root_z_log[-final_window_steps:].mean())
-    success = bool(final_window_mean > args.recovery_z)
-    write_json(
-        Path(args.summary_path),
+    summary_payload = {
+        "created_at": now_iso(),
+        "mode": "induce",
+        "goal_key": args.goal_key,
+        "source_state_id": args.source_state_id,
+        "trajectory_path": str(trajectory_path),
+        "fallen_z_threshold_m": args.fallen_z,
+        "recovery_z_threshold_m": args.recovery_z,
+        "horizon_s": args.horizon_s,
+        "sim_dt": sim_dt,
+        "success": False,
+        "perturbation_success": perturbation_success,
+        "failure_reason": failure_reason,
+        "disturbance_method": None if disturbance_controller.last_event is None else disturbance_controller.last_event.method,
+        "disturbance_event": None if disturbance_controller.last_event is None else disturbance_controller.last_event.to_dict(),
+        "final_window_mean_root_z_m": float("nan"),
+        "max_root_z_m": float("nan"),
+        "min_root_z_first_1s_m": float("nan"),
+        "elastic_band_auto_released": elastic_band_auto_released,
+    }
+    if qpos_log:
+        trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+        qpos_arr = rt.np.asarray(qpos_log, dtype=rt.np.float32)
+        qvel_arr = rt.np.asarray(qvel_log, dtype=rt.np.float32)
+        root_z_arr = rt.np.asarray(root_z_log, dtype=rt.np.float32)
+        time_arr = rt.np.asarray(time_log, dtype=rt.np.float32)
+        rt.np.savez_compressed(
+            trajectory_path,
+            time_s=time_arr,
+            qpos=qpos_arr,
+            qvel=qvel_arr,
+            root_z=root_z_arr,
+        )
+        final_window_mask = time_arr >= max(0.0, float(time_arr[-1]) - 0.5)
+        final_window_mean = float(root_z_arr[final_window_mask].mean())
+        first_window_mask = time_arr <= 1.0 + 1e-9
+        min_root_z_first_1s = float(root_z_arr[first_window_mask].min()) if first_window_mask.any() else float("nan")
+        summary_payload["steps"] = int(qpos_arr.shape[0])
+        summary_payload["success"] = bool(not failure_reason and final_window_mean > args.recovery_z)
+        summary_payload["final_window_mean_root_z_m"] = final_window_mean
+        summary_payload["max_root_z_m"] = float(root_z_arr.max())
+        summary_payload["min_root_z_first_1s_m"] = min_root_z_first_1s
+        summary_payload["perturbation_success"] = bool(min_root_z_first_1s < args.fallen_z)
+
+    write_json(Path(args.summary_path), summary_payload)
+    disturbance_controller.maybe_write_status(
         {
             "created_at": now_iso(),
-            "mode": "replay",
-            "goal_key": args.goal_key,
-            "source_state_id": args.source_state_id,
-            "trajectory_path": str(trajectory_path),
-            "fallen_z_threshold_m": args.fallen_z,
-            "recovery_z_threshold_m": args.recovery_z,
-            "horizon_s": args.horizon_s,
-            "sim_dt": sim_dt,
-            "steps": int(record_count),
-            "success": success,
-            "final_window_mean_root_z_m": final_window_mean,
-            "max_root_z_m": float(root_z_log.max()),
+            "mode": args.mode,
+            "started": started,
+            "has_received_lowcmd": bool(sim_bridge.has_received_command),
+            "ready_for_disturbance": ready_for_disturbance,
+            "static_window_ok": ready_for_disturbance,
+            "perturbation_success": bool(summary_payload["perturbation_success"]),
         },
+        force=True,
     )
     write_json(Path(args.done_file), {"created_at": now_iso(), "summary_path": str(args.summary_path)})
     return 0
@@ -2433,14 +3115,68 @@ def build_parser() -> argparse.ArgumentParser:
     p1.add_argument("--stable-root-span-m", type=float, default=0.03)
     p1.add_argument("--port-base", type=int, default=26000)
 
-    p2 = subparsers.add_parser("stage2", help="Replay saved states with isolated simulator + deployer runs")
-    p2.add_argument("--stage1-manifest", type=str, required=True)
+    p2 = subparsers.add_parser("stage2", help="Replay saved states or induce falls with isolated simulator + deployer runs")
+    p2.add_argument("--stage1-manifest", type=str, default=None)
+    p2.add_argument("--run-id", type=str, default=None)
+    p2.add_argument("--seed", type=int, default=0)
     p2.add_argument("--goal-key", type=str, default=DEFAULT_GOAL_KEY)
     p2.add_argument("--fallen-z", type=float, default=DEFAULT_FALLEN_Z_M)
     p2.add_argument("--recovery-z", type=float, default=DEFAULT_RECOVERY_Z_M)
     p2.add_argument("--horizon-s", type=float, default=DEFAULT_HORIZON_S)
     p2.add_argument("--port-base", type=int, default=28000)
     p2.add_argument("--policy-ready-timeout-s", type=float, default=30.0)
+    p2.add_argument("--induce-fall-in-simulator", action="store_true")
+    p2.add_argument("--num-runs", type=int, default=100)
+    p2.add_argument("--max-attempts-per-run", type=int, default=10)
+    p2.add_argument("--static-ready-timeout-s", type=float, default=45.0)
+    p2.add_argument("--post-start-min-wait-s", type=float, default=0.5)
+    p2.add_argument("--stable-dwell-s", type=float, default=0.25)
+    p2.add_argument("--stable-root-speed-mps", type=float, default=0.15)
+    p2.add_argument("--stable-ang-speed-rps", type=float, default=0.75)
+    p2.add_argument("--stable-joint-speed-rms", type=float, default=0.6)
+    p2.add_argument("--stable-root-span-m", type=float, default=0.03)
+    p2.add_argument("--disturbance-method-override", choices=["mixed", "wrench", "velocity_delta"], default="velocity_delta")
+    p2.add_argument("--disturbance-scale-multiplier", type=float, default=1.0)
+    p2.add_argument("--wrench-force-min-n", type=float, default=DEFAULT_WRENCH_FORCE_MIN_N)
+    p2.add_argument("--wrench-force-max-n", type=float, default=DEFAULT_WRENCH_FORCE_MAX_N)
+    p2.add_argument("--wrench-torque-min-nm", type=float, default=DEFAULT_WRENCH_TORQUE_MIN_NM)
+    p2.add_argument("--wrench-torque-max-nm", type=float, default=DEFAULT_WRENCH_TORQUE_MAX_NM)
+    p2.add_argument("--wrench-duration-s", type=float, default=DEFAULT_WRENCH_DURATION_S)
+    p2.add_argument("--linear-velocity-min-mps", type=float, default=DEFAULT_LINEAR_VELOCITY_MIN_MPS)
+    p2.add_argument("--linear-velocity-max-mps", type=float, default=DEFAULT_LINEAR_VELOCITY_MAX_MPS)
+    p2.add_argument("--angular-velocity-min-rps", type=float, default=DEFAULT_ANGULAR_VELOCITY_MIN_RPS)
+    p2.add_argument("--angular-velocity-max-rps", type=float, default=DEFAULT_ANGULAR_VELOCITY_MAX_RPS)
+
+    p2t = subparsers.add_parser("tune-disturbance", help="Run nominal-vs-0.1x disturbance tuning sweeps")
+    p2t.add_argument("--run-id", type=str, default=None)
+    p2t.add_argument("--seed", type=int, default=0)
+    p2t.add_argument("--goal-key", type=str, default=DEFAULT_GOAL_KEY)
+    p2t.add_argument("--fallen-z", type=float, default=DEFAULT_FALLEN_Z_M)
+    p2t.add_argument("--recovery-z", type=float, default=DEFAULT_RECOVERY_Z_M)
+    p2t.add_argument("--horizon-s", type=float, default=DEFAULT_INDUCED_HORIZON_S)
+    p2t.add_argument("--port-base", type=int, default=32000)
+    p2t.add_argument("--policy-ready-timeout-s", type=float, default=30.0)
+    p2t.add_argument("--num-runs", type=int, default=20)
+    p2t.add_argument("--max-attempts-per-run", type=int, default=1)
+    p2t.add_argument("--static-ready-timeout-s", type=float, default=45.0)
+    p2t.add_argument("--post-start-min-wait-s", type=float, default=0.5)
+    p2t.add_argument("--stable-dwell-s", type=float, default=0.25)
+    p2t.add_argument("--stable-root-speed-mps", type=float, default=0.15)
+    p2t.add_argument("--stable-ang-speed-rps", type=float, default=0.75)
+    p2t.add_argument("--stable-joint-speed-rms", type=float, default=0.6)
+    p2t.add_argument("--stable-root-span-m", type=float, default=0.03)
+    p2t.add_argument("--disturbance-method-override", choices=["mixed", "wrench", "velocity_delta"], default="velocity_delta")
+    p2t.add_argument("--disturbance-scale-multiplier", type=float, default=1.0)
+    p2t.add_argument("--wrench-force-min-n", type=float, default=DEFAULT_WRENCH_FORCE_MIN_N)
+    p2t.add_argument("--wrench-force-max-n", type=float, default=DEFAULT_WRENCH_FORCE_MAX_N)
+    p2t.add_argument("--wrench-torque-min-nm", type=float, default=DEFAULT_WRENCH_TORQUE_MIN_NM)
+    p2t.add_argument("--wrench-torque-max-nm", type=float, default=DEFAULT_WRENCH_TORQUE_MAX_NM)
+    p2t.add_argument("--wrench-duration-s", type=float, default=DEFAULT_WRENCH_DURATION_S)
+    p2t.add_argument("--linear-velocity-min-mps", type=float, default=DEFAULT_LINEAR_VELOCITY_MIN_MPS)
+    p2t.add_argument("--linear-velocity-max-mps", type=float, default=DEFAULT_LINEAR_VELOCITY_MAX_MPS)
+    p2t.add_argument("--angular-velocity-min-rps", type=float, default=DEFAULT_ANGULAR_VELOCITY_MIN_RPS)
+    p2t.add_argument("--angular-velocity-max-rps", type=float, default=DEFAULT_ANGULAR_VELOCITY_MAX_RPS)
+    p2t.add_argument("--tuning-gate-max-success-rate", type=float, default=0.5)
 
     p3 = subparsers.add_parser("stage3", help="Post-process stage2 logs into metrics, plots, and tiled video")
     p3.add_argument("--stage2-dir", type=str, required=True)
@@ -2461,7 +3197,7 @@ def build_parser() -> argparse.ArgumentParser:
     p5.add_argument("--report-path", type=str, default="BFM_ZERO_FALLEN_RECOVERY_FAILURE_ANALYSIS.md")
 
     ps = subparsers.add_parser("_sim_runner", help=argparse.SUPPRESS)
-    ps.add_argument("--mode", choices=["replay"], required=True)
+    ps.add_argument("--mode", choices=["replay", "induce"], required=True)
     ps.add_argument("--robot-config", type=str, required=True)
     ps.add_argument("--scene-config", type=str, required=True)
     ps.add_argument("--ready-file", type=str, required=True)
@@ -2488,6 +3224,8 @@ def main() -> int:
         return stage1(args)
     if args.command == "stage2":
         return stage2(args)
+    if args.command == "tune-disturbance":
+        return tune_disturbance(args)
     if args.command == "stage3":
         return stage3(args)
     if args.command == "render-failed-videos":

@@ -28,3 +28,6 @@
 [submodule "thirdparties/BFM-Zero-deploy"]
 	path = thirdparties/BFM-Zero-deploy
 	url = https://github.com/LeCAR-Lab/BFM-Zero
+[submodule "thirdparties/kimodo"]
+	path = thirdparties/kimodo
+	url = https://github.com/nv-tlabs/kimodo
