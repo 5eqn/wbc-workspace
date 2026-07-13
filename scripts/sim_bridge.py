@@ -84,6 +84,41 @@ NEUTRAL_JOINT_Q = [
     0.0,
 ]
 
+ZMQ_PACKED_HEADER_SIZE = 1280
+
+
+def pack_sim_state_message(topic: str, bridge: Any, data: Any, frame_index: int) -> bytes:
+    """Pack the opt-in host planner sensor feed using SONIC's documented wire layout."""
+    import numpy as np
+
+    joint_pos = np.asarray(bridge.body_q(), dtype="<f4").reshape(1, 29)
+    joint_vel = np.asarray(bridge.body_dq(), dtype="<f4").reshape(1, 29)
+    body_quat_w = np.asarray(data.qpos[3:7], dtype="<f4").reshape(1, 4)
+    frame = np.asarray([frame_index], dtype="<i8")
+    fields = [
+        ("joint_pos", "f32", joint_pos),
+        ("joint_vel", "f32", joint_vel),
+        ("body_quat_w", "f32", body_quat_w),
+        ("frame_index", "i64", frame),
+    ]
+    header = {
+        "v": 1,
+        "endian": "le",
+        "count": 1,
+        "fields": [
+            {"name": name, "dtype": dtype, "shape": list(value.shape)}
+            for name, dtype, value in fields
+        ],
+    }
+    encoded = json.dumps(header, separators=(",", ":")).encode()
+    if len(encoded) > ZMQ_PACKED_HEADER_SIZE:
+        raise ValueError("sim-state ZMQ header exceeds fixed packed-message header")
+    return (
+        topic.encode()
+        + encoded.ljust(ZMQ_PACKED_HEADER_SIZE, b"\0")
+        + b"".join(value.tobytes(order="C") for _, _, value in fields)
+    )
+
 
 def set_named_joint_qpos(model: Any, data: Any, mujoco: Any, q: list[float]) -> None:
     for i, joint_name in enumerate(BODY_JOINT_NAMES):
@@ -418,6 +453,8 @@ def main() -> int:
     parser.add_argument("--cmd-timeout-s", type=float, default=0.25)
     parser.add_argument("--viewer", action="store_true")
     parser.add_argument("--viewer-fps", type=float, default=60.0)
+    parser.add_argument("--state-zmq-port", type=int, default=0)
+    parser.add_argument("--state-zmq-topic", default="sim_state")
     args = parser.parse_args()
     args.publish_every = max(1, args.publish_every)
     args.viewer_fps = max(1.0, float(args.viewer_fps))
@@ -450,6 +487,17 @@ def main() -> int:
     set_named_joint_qpos(model, data, mujoco, NEUTRAL_JOINT_Q)
     mujoco.mj_forward(model, data)
     bridge = UnitreeG1Bridge(model, data, mujoco, sdk)
+    state_socket = None
+    if args.state_zmq_port:
+        import zmq
+
+        state_socket = zmq.Context.instance().socket(zmq.PUB)
+        state_socket.bind(f"tcp://*:{args.state_zmq_port}")
+        print(
+            f"[sim_bridge] planner state feed bound to tcp://*:{args.state_zmq_port} "
+            f"topic={args.state_zmq_topic}",
+            flush=True,
+        )
     support_root_qpos = data.qpos[:7].copy()
     support_root_qvel = data.qvel[:6].copy()
     viewer = launch_interactive_window(model, data, mujoco, bridge.torso_body_id) if args.viewer else None
@@ -607,6 +655,15 @@ def main() -> int:
                 for i in range(bridge.num_motor):
                     replay_row[f"measured_q_{i}"] = f"{float(measured_q[i]):.9f}"
                 replay_writer.writerow(replay_row)
+                if state_socket is not None:
+                    state_socket.send(
+                        pack_sim_state_message(
+                            args.state_zmq_topic,
+                            bridge,
+                            data,
+                            round(float(data.time) * args.log_hz),
+                        )
+                    )
                 status_f.flush()
                 lowcmd_f.flush()
                 replay_f.flush()
@@ -643,6 +700,8 @@ def main() -> int:
                 time.sleep(sleep_s)
             step += 1
     finally:
+        if state_socket is not None:
+            state_socket.close(linger=0)
         if viewer is not None:
             viewer.close()
         status_f.close()
@@ -672,6 +731,8 @@ def main() -> int:
             "qvel_columns": [f"qvel_{i}" for i in range(model.nv)],
             "body_joint_names": BODY_JOINT_NAMES,
             "body_qpos_addresses": bridge.body_qpos_adrs,
+            "state_zmq_port": args.state_zmq_port,
+            "state_zmq_topic": args.state_zmq_topic,
         }, indent=2) + "\n"
     )
     return 0

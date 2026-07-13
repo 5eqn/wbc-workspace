@@ -31,3 +31,6 @@
 [submodule "thirdparties/kimodo"]
 	path = thirdparties/kimodo
 	url = https://github.com/nv-tlabs/kimodo
+[submodule "thirdparties/ubisoft-laforge-animation-dataset"]
+	path = thirdparties/ubisoft-laforge-animation-dataset
+	url = https://github.com/ubisoft/ubisoft-laforge-animation-dataset.git

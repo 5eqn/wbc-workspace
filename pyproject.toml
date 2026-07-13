@@ -1,5 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wbc-heracles-planner"
+version = "0.1.0"
+description = "Host-side 35D Heracles planner reproduction and SONIC adapter"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "joblib==1.5.1",
+    "mujoco==3.3.7",
+    "numpy==2.3.4",
+    "onnx==1.19.1",
+    "onnxruntime-gpu==1.23.2",
+    "pyzmq==27.1.0",
+    "scipy==1.16.3",
+    "torch==2.8.0",
+]
+
+[project.scripts]
+heracles-planner = "heracles_planner.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest==9.0.2",
+    "ruff==0.14.10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/heracles_planner"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.ruff]
-target-version = "py310"
+line-length = 100
+target-version = "py311"
 
 [tool.ruff.lint]
-per-file-ignores = { "scripts/benchmark_common.py" = ["F401"], "scripts/benchmark_checks.py" = ["F403", "F405"], "scripts/benchmark_report.py" = ["F403", "F405"], "scripts/benchmark_runtime.py" = ["F403", "F405"] }
+select = ["E", "F", "I", "UP", "B"]
+per-file-ignores = { "scripts/benchmark_common.py" = ["F401"], "scripts/benchmark_checks.py" = ["F403", "F405"], "scripts/benchmark_report.py" = ["F403", "F405"], "scripts/benchmark_runtime.py" = ["F403", "F405"], "scripts/sim_bridge.py" = ["E501", "I001"] }

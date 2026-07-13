@@ -1,0 +1,4 @@
+interface:
+  display_name: "Heracles SONIC Reproduction"
+  short_description: "Preprocess, train, attach, and evaluate Heracles with SONIC"
+  default_prompt: "Use $heracles-sonic-reproduction to run or verify the Heracles planner reproduction and SONIC attachment."

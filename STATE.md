@@ -22,6 +22,8 @@
 | 2026-07-09T15:29:50+08:00 | BFM-ZERO-INDUCED-WRENCH1X-DEFAULT | Restored the induced-mode wrench defaults to the original `1x` range (`600-1800 N`, `200-600 Nm`) and reran the 100-run mixed induced sweep as `induced-full-20260709c-wrench1x-default`: `100/100` accepted perturbations, `77/100` recoveries overall, with wrench at `29/50` and velocity-delta at `48/50`. |
 | 2026-07-09T15:56:00+08:00 | BFM-ZERO-STAGE3-TRACKING-CAMERA | Switched the BFM-Zero Stage 3 offline renderer back to MuJoCo tracking-camera mode and seeded the initial look-at from the pelvis pose so the first rendered frame starts centered on the robot. |
 | 2026-07-09T17:14:57+08:00 | BFM-ZERO-VELOCITY-ONLY-D | Switched the induced defaults to velocity-only with nominal linear `3-6 m/s`, angular `4-8 rad/s`, and an up-cosine gate of `[-0.8, 0.0]`, then completed `induced-full-20260709d-velocity-default` with `100/100` accepted perturbations, `98/100` recoveries, and a verified Stage 3 frame-0 on-robot camera start. |
+| 2026-07-10T17:43:27+08:00 | HERACLES-FULL-TRAINING-ACTIVE | Implemented the repo-owned host-only 35D Heracles reproduction, exact 40-motion subject split and 30-to-50 Hz preprocessing, train-only normalization, finite-difference Jacobian weights, 22.64M-parameter AdaLN flow model, ONNX/runtime and SONIC protocol-v1 attachment surfaces, opt-in simulator state feed, and paired metric selection. The complete deterministic RTX 3090 estimate passed at `23.50 h` including validation and conservative checkpoint I/O. A one-epoch smoke model passed PyTorch/ONNX parity (`1.79e-6`) and sustained 25 Hz (6.54 ms p99). The resumable 4,000-epoch run was active in tmux session `heracles-full-training` at session close (epoch 15 completed); final export, integrated comparisons, statistics, and videos remain pending. |
+| 2026-07-13T09:10:00+08:00 | LAFAN1-FALL-VIDEO-EXPORT | Audited the read-only G1-retargeted LAFAN1 fall/get-up subset (6 clips, 28,043 headerless frames at 30 FPS, 934.767 seconds) and exported six separate 1x H.264 videos using the matching G1 29-DOF MuJoCo model. Exact frame/FPS/resolution parity, full-stream decode, checksums, and representative visual frames passed. |
 
 ## Files
 
@@ -75,6 +77,18 @@
 | `logs/quick_unitree_sdk2py/*` | INIT | Quick Unitree SDK2 Python smoke outputs. |
 | `logs/bfm-zero-fallen-recovery/*` | BFM-ZERO-VELOCITY-ONLY-D | Stage 1 manifests, settled state files, strict-sampling replay logs, and induced-mode Stage 2 run directories including the mixed comparison sweeps plus the velocity-only `induced-full-20260709d-velocity-default` run. |
 | `artifacts/bfm-zero-fallen-recovery/*` | BFM-ZERO-VELOCITY-ONLY-D | Stage 3 metrics, plots, tiled videos, failed-run 1080p exports, tuning summaries, and the induced-mode comparison artifacts including the velocity-only `induced-full-20260709d-velocity-default` sweep and its verified frame-0 camera centering. |
+| `HERACLES_PLANNER_REPRODUCTION.md` | HERACLES-FULL-TRAINING-ACTIVE | Reproduction contract, commands, parameter provenance, data conventions, attachment design, evaluation contract, measured duration gate, smoke gates, and honest active-training status. |
+| `pyproject.toml` | HERACLES-FULL-TRAINING-ACTIVE | Tracked Python 3.11 host project for preprocessing, training, ONNX, MuJoCo kinematics, and ZMQ runtime; planner commands are exposed as `heracles-planner`. |
+| `uv.lock` | HERACLES-FULL-TRAINING-ACTIVE | Exact host-only planner dependency lock verified by `uv sync --frozen`. |
+| `src/heracles_planner/*` | HERACLES-FULL-TRAINING-ACTIVE | Repo-owned preprocessing, rotations, model, resumable deterministic training and duration gate, inference/export, protocol-v1 serving, and paired evaluation metrics/selection package. |
+| `tests/test_heracles.py` | HERACLES-FULL-TRAINING-ACTIVE | Unit coverage for subject splits, rotation conventions, model shape/count, flow inpainting, wire protocols, simulator state feed, and untouched reference tail. |
+| `tests/test_evaluation.py` | HERACLES-FULL-TRAINING-ACTIVE | Unit coverage for disturbed metrics and lexicographic deterministic win selection. |
+| `scripts/sim_bridge.py` | HERACLES-FULL-TRAINING-ACTIVE | Existing host MuJoCo DDS bridge with an opt-in packed ZMQ measured-state publisher for the host planner; default behavior remains unchanged. |
+| `logs/heracles-planner/data/*` | HERACLES-FULL-TRAINING-ACTIVE | Generated 50 Hz cache for all 40 read-only LAFAN1 motions plus source-hash manifest and train-only normalization/Jacobian weights. |
+| `artifacts/heracles-planner/*` | HERACLES-FULL-TRAINING-ACTIVE | Model summary, complete duration gate, smoke checkpoint/ONNX/parity/rate evidence, and active full-run resumable checkpoints/status. |
+| `.agents/skills/heracles-sonic-reproduction/*` | HERACLES-FULL-TRAINING-ACTIVE | Validated repo skill for reproducing the data/model gates and continuing export, attachment, and evaluation after upstream checks pass. |
+| `scripts/render_lafan1_fall_getup.py` | LAFAN1-FALL-VIDEO-EXPORT | Reusable renderer for the six G1-retargeted LAFAN1 fall/get-up CSVs, including the source `xyzw` to MuJoCo `wxyz` free-base quaternion conversion and a pelvis-tracking camera. |
+| `artifacts/lafan1-fall-getup-g1/*` | LAFAN1-FALL-VIDEO-EXPORT | Six separate 640x480 H.264 MP4s at the source 30 FPS/1x speed, plus a JSON manifest, SHA-256 checksums, and visual-validation frames/contact sheet. |
 
 ## Skills
 
@@ -88,3 +102,4 @@
 | `humanoid-gpt-translation` | `.agents/skills/humanoid-gpt-translation` | REPO-SKILLS | Humanoid-GPT translation or equivalence requests | Translate SONIC and HoloMotion benchmark motions into Humanoid-GPT format and verify equivalence. |
 | `humanoid-gpt-builtin-eval` | `.agents/skills/humanoid-gpt-builtin-eval` | REPO-SKILLS | Official Humanoid-GPT evaluation requests | Run official Humanoid-GPT evaluation and render output videos for translated motions. |
 | `humanoid-gpt-sim2sim` | `.agents/skills/humanoid-gpt-sim2sim` | REPO-SKILLS | Shared MuJoCo Humanoid-GPT benchmark requests | Run Humanoid-GPT inside the shared benchmark runtime path and regenerate shared backend reports. |
+| `heracles-sonic-reproduction` | `.agents/skills/heracles-sonic-reproduction` | HERACLES-FULL-TRAINING-ACTIVE | Heracles preprocessing, training, gating, export, SONIC attachment, or paired evaluation requests | Reproduce the fixed 35D planner and enforce the 72-hour, ONNX parity, and 25 Hz gates before integrated SONIC evaluation. |

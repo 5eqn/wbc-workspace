@@ -1,6 +1,7 @@
 assets
 artifacts
 logs
+.venv
 **/__pycache__
 **/*.png
 **/*.zip
