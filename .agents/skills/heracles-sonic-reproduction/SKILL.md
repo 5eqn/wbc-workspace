@@ -42,6 +42,19 @@ uv run heracles-planner benchmark-inference \
 
 Require passing deterministic ONNX parity and sustained 25 Hz before attachment.
 
+## Inspect checkpoints
+
+When human review is requested before attachment, generate the deterministic four-lag best/last
+pose videos directly from the PyTorch checkpoints:
+
+```bash
+uv run heracles-planner debug-videos
+```
+
+Open `artifacts/heracles-planner/debug-videos/index.html`. Require four videos per checkpoint and
+verify `manifest.json` reports 50 FPS with decoded frame count equal to the selected source length.
+This offline review does not replace final ONNX parity, rate, or integrated tracking gates.
+
 ## Attach and evaluate
 
 Enable the simulator's opt-in `--state-zmq-port 15558` feed. Run the host `serve` command against

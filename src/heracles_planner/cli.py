@@ -6,6 +6,20 @@ from pathlib import Path
 
 from .config import HeraclesConfig
 from .data import preprocess_dataset
+from .debug_videos import (
+    DEFAULT_CHECKPOINT_ROOT,
+    DEFAULT_MOTION_ROOT,
+    generate_debug_videos,
+)
+from .debug_videos import (
+    DEFAULT_DATA as DEFAULT_DEBUG_DATA,
+)
+from .debug_videos import (
+    DEFAULT_OUTPUT as DEFAULT_DEBUG_OUTPUT,
+)
+from .debug_videos import (
+    DEFAULT_SCENE as DEFAULT_DEBUG_SCENE,
+)
 from .evaluation import summarize_trials
 from .inference import benchmark_inference, export_onnx
 from .model import HeraclesPlanner
@@ -68,6 +82,25 @@ def _parser() -> argparse.ArgumentParser:
     summarize = sub.add_parser("summarize-evaluation")
     summarize.add_argument("trials", nargs="+", type=Path)
     summarize.add_argument("--output", type=Path, required=True)
+    debug = sub.add_parser("debug-videos")
+    debug.add_argument(
+        "--checkpoint",
+        action="append",
+        type=Path,
+        default=None,
+        help="Repeat to select checkpoints; defaults to best.pt and last.pt.",
+    )
+    debug.add_argument(
+        "--normalization", type=Path, default=DEFAULT_DEBUG_DATA / "normalization.npz"
+    )
+    debug.add_argument("--data", type=Path, default=DEFAULT_DEBUG_DATA)
+    debug.add_argument("--motion-root", type=Path, default=DEFAULT_MOTION_ROOT)
+    debug.add_argument("--scene", type=Path, default=DEFAULT_DEBUG_SCENE)
+    debug.add_argument("--output", type=Path, default=DEFAULT_DEBUG_OUTPUT)
+    debug.add_argument("--motion", action="append", default=None)
+    debug.add_argument("--limit-frames", type=int, default=0)
+    debug.add_argument("--batch-frames", type=int, default=32)
+    debug.add_argument("--overwrite", action="store_true")
     return parser
 
 
@@ -109,6 +142,24 @@ def main() -> int:
         )
     elif args.command == "summarize-evaluation":
         print(json.dumps(summarize_trials(args.trials, args.output), indent=2))
+    elif args.command == "debug-videos":
+        checkpoints = args.checkpoint or [
+            DEFAULT_CHECKPOINT_ROOT / "best.pt",
+            DEFAULT_CHECKPOINT_ROOT / "last.pt",
+        ]
+        result = generate_debug_videos(
+            checkpoints=checkpoints,
+            normalization=args.normalization,
+            data_root=args.data,
+            motion_root=args.motion_root,
+            scene=args.scene,
+            output=args.output,
+            motions=args.motion,
+            limit_frames=args.limit_frames,
+            batch_frames=args.batch_frames,
+            overwrite=args.overwrite,
+        )
+        print(json.dumps({"videos": len(result["videos"]), "output": str(args.output)}, indent=2))
     return 0
 
 

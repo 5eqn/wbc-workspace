@@ -6,16 +6,16 @@ The host package, locked environment, dataset preprocessing, model, training gat
 runtime adapter, SONIC protocol-v1 encoder, opt-in simulator state feed, and paired-metric selection
 code are implemented.
 
-The complete RTX 3090 gate projects 23.50 hours for 4,000 epochs, including validation and a
-conservative two checkpoint writes per epoch, so the required full run was started. It is resumable
-and updates `artifacts/heracles-planner/checkpoints/training_status.json` after every epoch. At this
-document update it had completed epoch 15 of 3,999 with a live ETA of about 15.5 hours.
+The complete 4,000-epoch run finished on the RTX 3090. Validation-only selection chose `best.pt`
+from epoch 8 with validation loss `0.5754208702523753`; `last.pt` is epoch 3,999 with validation
+loss `2.028678930124397`. The large gap is being treated as possible overfitting, so both
+checkpoints were retained for the offline human-review gate below.
 
 A one-epoch preflight checkpoint passed deterministic CPU PyTorch/ONNX parity at a maximum absolute
 error of `1.79e-6`. CUDA ONNX inference passed the 25 Hz gate at 5.53 ms mean and 6.54 ms p99. These
-are pipeline smoke results, not final-model results. Until the full run, final export, and integrated
-evaluation finish, there is no final ONNX model, paired statistic, or comparison video, and no
-downstream outcome should be inferred.
+are pipeline smoke results, not final-model results. Final ONNX export and integrated SONIC
+evaluation remain pending the checkpoint video review, and no downstream tracking outcome should
+be inferred from the offline pose videos.
 
 Evidence:
 
@@ -25,6 +25,9 @@ Evidence:
 - `artifacts/heracles-planner/training_duration_gate.json`: measured duration gate.
 - `artifacts/heracles-planner/smoke-onnx-parity.json`: preflight export parity.
 - `artifacts/heracles-planner/smoke-inference-25hz.json`: preflight runtime rate.
+- `artifacts/heracles-planner/debug-videos/manifest.json`: hashes and decoded frame-count proof for
+  the eight focused checkpoint-review videos.
+- `artifacts/heracles-planner/debug-videos/index.html`: side-by-side best/last human-review index.
 - `uv.lock`: exact host dependency resolution.
 
 ## Reproduction commands
@@ -51,6 +54,12 @@ uv run heracles-planner export \
   --checkpoint artifacts/heracles-planner/checkpoints/best.pt
 uv run heracles-planner benchmark-inference \
   --model artifacts/heracles-planner/heracles.onnx
+```
+
+Generate or resume the offline best/last checkpoint review set:
+
+```bash
+uv run heracles-planner debug-videos
 ```
 
 ## Dataset and conventions
@@ -163,6 +172,24 @@ warm start, published reference, and derived velocity to JSONL.
 
 No third-party source file was patched.
 
+## Offline checkpoint review gate
+
+Before integrated evaluation, `debug-videos` renders `dance_phony_c01_neutral2s`,
+`squat_001__A359_neutral2s`, and the first 12 seconds (601 frames at 50 Hz) of
+`fallAndGetUp1_subject1` and `fallAndGetUp1_subject4` for both `best.pt` and `last.pt`. This
+produces eight videos and 4,560 decoded video frames in total.
+
+Each frame is a four-row by five-column grid. Rows use target lags 2, 5, 15, and 50. Every row
+shows the current pose at frame `T`, generated 50 Hz frames `+2`, `+5`, and `+10` from one planner
+call, and the reference target at `T+lag`. Frame `+2` is marked as the pose that would be applied
+at the next 25 Hz replan; frames `+5` and `+10` are inspection-only. The directional prefix begins
+at `T+lag`, and all source accesses clamp to the final reference frame.
+
+Noise is deterministically derived from SHA-256 of seed 42, motion, source frame, and lag. The same
+noise is therefore used for corresponding best/last calls. Generated pose arrays are saved beside
+each video. The manifest records checkpoint/source/video hashes, checkpoint epoch and validation
+loss, FPS, and fully decoded frame counts. The HTML index presents both checkpoints side by side.
+
 ## Evaluation contract
 
 `heracles-planner summarize-evaluation` consumes paired trial NPZ files and implements the required
@@ -173,5 +200,5 @@ root-height error below 0.3 m in the final 0.5 seconds.
 
 The planned induced disturbance remains exactly one paired linear delta of 3–6 m/s and angular
 delta of 4–8 rad/s at 0.5 seconds, with independent uniform sphere directions, only on motions at
-least 2.5 seconds. Since full training is still active, no disturbance has been applied and no
-evaluation statistic or video is claimed.
+least 2.5 seconds. Integrated disturbances have not yet been applied, and no paired tracking
+statistic is claimed.
