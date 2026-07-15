@@ -27,6 +27,7 @@
 | 2026-07-14T10:40:00+08:00 | BFM-ZERO-LATENT-INSPECTOR | Added a dependency-free static inspector for the two 100-run BFM-Zero get-up experiments, with shared unit-sphere PCA, first-fall orientation colors, original-256D angular anomaly metrics, synchronized tiled video selection and timeline controls, and a reproducibly generated data artifact. |
 | 2026-07-14T14:32:00+08:00 | BFM-ZERO-LATENT-INSPECTOR-ORIENTATION | Changed P/S/L/O classification to use the lowest-root sample in each raw trajectory's first second, added per-orientation keyboard selection toggles, doubled tiled-video orientation borders, and regenerated the 200-trial artifact. |
 | 2026-07-14T17:05:00+08:00 | BFM-ZERO-ACTOR-INDUCED-SMOKE-COMPARISON | Stopped the zero-success new-model sweep after 100 random and 41 induced runs, confirmed matched old-checkpoint/old-actor smokes recover in both modes, and exported full-resolution videos from the exact successful old-actor and failed new-actor induced trajectories. |
+| 2026-07-14T18:10:00+08:00 | BFM-ZERO-NEW-MODEL-DIAGNOSIS | Created deploy branch `bfm-zero-new-model-onnx-fix` and committed telemetry as `69cdfd3`; verified local new-model files exactly match Hugging Face, proved the published new ONNX mismatches its checkpoint, re-exported a parity-correct ONNX without replacing the original, and showed the checkpoint still fails closed-loop induced recovery with widespread bounded action saturation. |
 
 ## Files
 
@@ -96,6 +97,7 @@
 | `web/bfm-zero-latent-inspector/index.html` | BFM-ZERO-LATENT-INSPECTOR-ORIENTATION | Single-file, framework-free Canvas inspector with 2 px orientation borders, drag and P/S/L/O group selection, a rotatable unit sphere, focused and median anomaly curves, and frame-quantized video/timeline synchronization. |
 | `artifacts/bfm-zero-latent-inspector/data.json` | BFM-ZERO-LATENT-INSPECTOR-ORIENTATION | Regenerated 200-trial payload using first-second lowest-root orientation labels for the 101-frame random-initial-state and 201-frame induced-fall videos. |
 | `artifacts/bfm-zero-actor-induced-smoke-comparison/*` | BFM-ZERO-ACTOR-INDUCED-SMOKE-COMPARISON | Two separate 1920x1080 H.264 videos at 25 FPS and 201 frames, replaying the exact seed-0 velocity-only induced smoke trajectories where the old actor recovered and the new actor failed. |
+| `artifacts/bfm-zero-new-model-diagnosis/report.json` | BFM-ZERO-NEW-MODEL-DIAGNOSIS | Machine-readable Hugging Face integrity, checkpoint/ONNX parity, action saturation, configuration-difference, and matched closed-loop smoke evidence for the unusable new model release. |
 
 ## Skills
 
