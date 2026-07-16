@@ -7,13 +7,14 @@ description: Preprocess, train, export, attach, and evaluate the repo-owned 35D 
 
 ## Prepare
 
-Read `HERACLES_PLANNER_REPRODUCTION.md` and the latest Heracles era in `STATE.md`. Preserve the
+Read `scripts/heracles_planner/README.md` and the latest Heracles era in `STATE.md`. Preserve the
 read-only dataset and third-party checkouts.
 
 ```bash
-uv sync --frozen
-uv run heracles-planner preprocess
-uv run pytest -q
+uv sync --project scripts/heracles_planner --frozen
+uv run --project scripts/heracles_planner heracles-planner preprocess
+uv run --project scripts/heracles_planner pytest -q scripts/heracles_planner/tests \
+  -o cache_dir=scripts/heracles_planner/.pytest_cache
 ```
 
 Verify `logs/heracles-planner/data/manifest.json` contains 40 motions and the fixed 26/7/7 split.
@@ -21,7 +22,7 @@ Verify `logs/heracles-planner/data/manifest.json` contains 40 motions and the fi
 ## Gate training
 
 ```bash
-uv run heracles-planner benchmark-training --steps 20
+uv run --project scripts/heracles_planner heracles-planner benchmark-training --steps 20
 ```
 
 Read `artifacts/heracles-planner/training_duration_gate.json`. Do not run full training when
@@ -33,10 +34,10 @@ parameter.
 Only after the duration gate passes:
 
 ```bash
-uv run heracles-planner train
-uv run heracles-planner export \
+uv run --project scripts/heracles_planner heracles-planner train
+uv run --project scripts/heracles_planner heracles-planner export \
   --checkpoint artifacts/heracles-planner/checkpoints/best.pt
-uv run heracles-planner benchmark-inference \
+uv run --project scripts/heracles_planner heracles-planner benchmark-inference \
   --model artifacts/heracles-planner/heracles.onnx
 ```
 
@@ -48,7 +49,7 @@ When human review is requested before attachment, generate the deterministic fou
 pose videos directly from the PyTorch checkpoints:
 
 ```bash
-uv run heracles-planner debug-videos
+uv run --project scripts/heracles_planner heracles-planner debug-videos
 ```
 
 Open `artifacts/heracles-planner/debug-videos/index.html`. Require four videos per checkpoint and

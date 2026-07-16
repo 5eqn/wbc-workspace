@@ -8,10 +8,13 @@ from heracles_planner.config import HeraclesConfig
 from heracles_planner.data import split_for_motion
 from heracles_planner.inference import PlannerRuntime
 from heracles_planner.model import HeraclesPlanner, conditional_flow_sample
+from heracles_planner.paths import REPO_ROOT
 from heracles_planner.rotations import quat_xyzw_to_rot6d, rot6d_to_quat_xyzw
 from heracles_planner.zmq_protocol import pack_pose_v1, unpack_message
 
-pack_sim_state_message = runpy.run_path("scripts/sim_bridge.py")["pack_sim_state_message"]
+pack_sim_state_message = runpy.run_path(REPO_ROOT / "scripts/sim_bridge.py")[
+    "pack_sim_state_message"
+]
 
 
 def test_subject_split_is_fixed():

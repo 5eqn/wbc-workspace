@@ -28,38 +28,39 @@ Evidence:
 - `artifacts/heracles-planner/debug-videos/manifest.json`: hashes and decoded frame-count proof for
   the eight focused checkpoint-review videos.
 - `artifacts/heracles-planner/debug-videos/index.html`: side-by-side best/last human-review index.
-- `uv.lock`: exact host dependency resolution.
+- `scripts/heracles_planner/uv.lock`: exact host dependency resolution.
 
 ## Reproduction commands
 
 ```bash
-uv sync --frozen
-uv run pytest -q
-uv run heracles-planner preprocess
-uv run heracles-planner inspect-model \
+uv sync --project scripts/heracles_planner --frozen
+uv run --project scripts/heracles_planner pytest -q scripts/heracles_planner/tests \
+  -o cache_dir=scripts/heracles_planner/.pytest_cache
+uv run --project scripts/heracles_planner heracles-planner preprocess
+uv run --project scripts/heracles_planner heracles-planner inspect-model \
   --output artifacts/heracles-planner/model_summary.json
-uv run heracles-planner benchmark-training --steps 50
+uv run --project scripts/heracles_planner heracles-planner benchmark-training --steps 50
 ```
 
 The training command resumes from `last.pt` when present:
 
 ```bash
-uv run heracles-planner train
+uv run --project scripts/heracles_planner heracles-planner train
 ```
 
 Only after an allowed full run produces `best.pt`:
 
 ```bash
-uv run heracles-planner export \
+uv run --project scripts/heracles_planner heracles-planner export \
   --checkpoint artifacts/heracles-planner/checkpoints/best.pt
-uv run heracles-planner benchmark-inference \
+uv run --project scripts/heracles_planner heracles-planner benchmark-inference \
   --model artifacts/heracles-planner/heracles.onnx
 ```
 
 Generate or resume the offline best/last checkpoint review set:
 
 ```bash
-uv run heracles-planner debug-videos
+uv run --project scripts/heracles_planner heracles-planner debug-videos
 ```
 
 ## Dataset and conventions

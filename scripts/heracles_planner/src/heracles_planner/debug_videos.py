@@ -19,15 +19,15 @@ from scipy.spatial.transform import Rotation, Slerp
 
 from .config import HeraclesConfig
 from .inference import TorchVelocityModel, load_torch_checkpoint
+from .paths import REPO_ROOT
 from .rotations import quat_xyzw_to_rot6d, rot6d_to_quat_xyzw
 
-ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DATA = ROOT / "logs/heracles-planner/data"
-DEFAULT_MOTION_ROOT = ROOT / "assets/motions/sonic_motions"
-DEFAULT_CHECKPOINT_ROOT = ROOT / "artifacts/heracles-planner/checkpoints"
-DEFAULT_OUTPUT = ROOT / "artifacts/heracles-planner/debug-videos"
+DEFAULT_DATA = REPO_ROOT / "logs/heracles-planner/data"
+DEFAULT_MOTION_ROOT = REPO_ROOT / "assets/motions/sonic_motions"
+DEFAULT_CHECKPOINT_ROOT = REPO_ROOT / "artifacts/heracles-planner/checkpoints"
+DEFAULT_OUTPUT = REPO_ROOT / "artifacts/heracles-planner/debug-videos"
 DEFAULT_SCENE = (
-    ROOT
+    REPO_ROOT
     / "thirdparties/GR00T-WholeBodyControl/motionbricks/assets/skeletons/g1/scene_29dof.xml"
 )
 

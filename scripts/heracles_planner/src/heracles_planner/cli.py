@@ -23,18 +23,18 @@ from .debug_videos import (
 from .evaluation import summarize_trials
 from .inference import benchmark_inference, export_onnx
 from .model import HeraclesPlanner
+from .paths import REPO_ROOT
 from .serve import serve
 from .training import benchmark_training, train
 
-ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SOURCE = ROOT / "thirdparties/BFM-Zero/humanoidverse/data/lafan_29dof.pkl"
+DEFAULT_SOURCE = REPO_ROOT / "thirdparties/BFM-Zero/humanoidverse/data/lafan_29dof.pkl"
 DEFAULT_MODEL_XML = (
-    ROOT
+    REPO_ROOT
     / "thirdparties/GR00T-WholeBodyControl/gear_sonic/data/assets/robot_description/mjcf"
     / "g1_29dof_rev_1_0.xml"
 )
-DEFAULT_DATA = ROOT / "logs/heracles-planner/data"
-DEFAULT_ARTIFACTS = ROOT / "artifacts/heracles-planner"
+DEFAULT_DATA = REPO_ROOT / "logs/heracles-planner/data"
+DEFAULT_ARTIFACTS = REPO_ROOT / "artifacts/heracles-planner"
 
 
 def _parser() -> argparse.ArgumentParser:
