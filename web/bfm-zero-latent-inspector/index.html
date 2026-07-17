@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="icon" href="data:,">
   <title>BFM-Zero Latent Inspector</title>
   <style>
     :root { color-scheme: dark; --bg:#0b0e13; --panel:#131821; --line:#29313d; --text:#e6edf5; --muted:#8f9aaa; }
@@ -14,9 +15,10 @@
     .legend { margin-left:auto; display:flex; gap:14px; color:var(--muted); }
     .legend span { display:flex; align-items:center; gap:5px; }
     .swatch { width:9px; height:9px; border-radius:50%; display:inline-block; }
-    main { height:calc(100vh - 112px); display:grid; grid-template-columns:minmax(420px,1.08fr) minmax(440px,.92fr); gap:10px; padding:10px; }
+    main { height:calc(100vh - 112px); display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; padding:10px; }
     .panel { min-height:0; background:var(--panel); border:1px solid var(--line); border-radius:7px; overflow:hidden; }
-    .video-panel { display:flex; align-items:center; justify-content:center; padding:10px; }
+    .left { display:grid; grid-template-rows:minmax(0,1fr) 210px; min-height:0; }
+    .video-panel { display:flex; min-height:0; align-items:center; justify-content:center; padding:10px; }
     #video-wrap { position:relative; width:100%; aspect-ratio:16/9; max-height:100%; }
     video { width:100%; height:100%; display:block; background:#000; }
     #trial-grid { position:absolute; inset:0; display:grid; grid-template-columns:repeat(10,1fr); grid-template-rows:repeat(10,1fr); touch-action:none; cursor:crosshair; }
@@ -24,30 +26,23 @@
     .trial.selected { background:transparent; }
     .trial.focused { outline:2px solid white; outline-offset:-3px; z-index:2; }
     #tooltip { position:fixed; display:none; pointer-events:none; z-index:10; padding:4px 7px; border-radius:4px; background:#05070a; border:1px solid #536071; font-size:12px; }
-    .right { display:grid; grid-template-rows:minmax(220px,1fr) 300px; min-height:0; }
-    #sphere { width:100%; height:100%; display:block; cursor:grab; touch-action:none; }
-    #sphere.dragging { cursor:grabbing; }
-    .metrics-wrap { display:grid; grid-template-rows:34px 1fr; border-top:1px solid var(--line); min-height:0; }
-    .metric-toggle { display:flex; align-items:center; justify-content:center; gap:0; border-bottom:1px solid var(--line); }
-    .metric-toggle button { border:1px solid #3b4655; background:#171d26; color:var(--muted); padding:4px 12px; cursor:pointer; }
-    .metric-toggle button:first-child { border-radius:5px 0 0 5px; }
-    .metric-toggle button:last-child { border-radius:0 5px 5px 0; border-left:0; }
-    .metric-toggle button.active { background:#344154; color:var(--text); }
-    .metrics { display:grid; min-height:0; }
-    .metrics.geometry { grid-template-columns:repeat(3,1fr); }
-    .metrics.diagnostics { grid-template-columns:repeat(2,1fr); grid-template-rows:repeat(2,1fr); }
-    .metrics[hidden] { display:none; }
+    .right { min-height:0; }
+    #cube { width:100%; height:100%; display:block; cursor:grab; touch-action:none; }
+    #cube.dragging { cursor:grabbing; }
+    .metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); min-height:0; border-top:1px solid var(--line); }
     .metric { position:relative; min-width:0; border-right:1px solid var(--line); }
     .metric { border-bottom:1px solid var(--line); }
     .metric canvas { width:100%; height:100%; display:block; }
-    .metric-label { position:absolute; left:9px; top:7px; font-size:11px; color:#b8c3d1; pointer-events:none; }
-    .metric-value { position:absolute; right:9px; top:7px; font-variant-numeric:tabular-nums; pointer-events:none; }
+    .metric-label { position:absolute; left:9px; top:6px; font-size:11px; color:#b8c3d1; pointer-events:none; }
+    .metric-value, .metric-gt-value { position:absolute; left:9px; right:9px; text-align:right; font-size:10px; font-variant-numeric:tabular-nums; pointer-events:none; white-space:nowrap; }
+    .metric-value { top:21px; }
+    .metric-gt-value { top:35px; color:#f2b84b; }
     footer { height:58px; border-top:1px solid var(--line); padding:8px 18px; display:grid; grid-template-columns:1fr auto; gap:6px 14px; align-items:center; }
     #timeline { width:100%; grid-column:1; accent-color:#d4dde9; }
     #time-label { grid-column:2; grid-row:1; min-width:190px; text-align:right; font-variant-numeric:tabular-nums; }
     #selection-label { grid-column:1/3; color:var(--muted); font-size:11px; }
     .empty { opacity:.45; }
-    @media (max-width:900px) { body { overflow:auto; } main { height:auto; grid-template-columns:1fr; } .panel { min-height:400px; } .right { height:620px; } }
+    @media (max-width:900px) { body { overflow:auto; } main { height:auto; grid-template-columns:1fr; } .left { height:620px; } .right { height:620px; } .metrics { grid-template-columns:repeat(2,1fr); } }
   </style>
 </head>
 <body>
@@ -62,27 +57,19 @@
     </div>
   </header>
   <main>
-    <section class="panel video-panel"><div id="video-wrap">
-      <video id="video" preload="auto" muted playsinline></video>
-      <div id="trial-grid" aria-label="10 by 10 trial selector"></div>
-    </div></section>
-    <section class="panel right">
-      <canvas id="sphere"></canvas>
-      <div class="metrics-wrap">
-        <div class="metric-toggle"><button class="active" data-mode="geometry">Motion geometry · 3</button><button data-mode="diagnostics">Model diagnostics · 4</button></div>
-        <div class="metrics geometry" data-mode-panel="geometry">
-          <div class="metric"><canvas data-metric="angular_speed_rad_s" data-axis="positive"></canvas><span class="metric-label">Angular speed</span><span class="metric-value"></span></div>
-          <div class="metric"><canvas data-metric="cumulative_path_rad" data-axis="positive"></canvas><span class="metric-label">Cumulative path</span><span class="metric-value"></span></div>
-          <div class="metric"><canvas data-metric="tortuosity" data-axis="positive"></canvas><span class="metric-label">Tortuosity</span><span class="metric-value"></span></div>
-        </div>
-        <div class="metrics diagnostics" data-mode-panel="diagnostics" hidden>
-          <div class="metric"><canvas data-metric="forward_future_l2" data-axis="positive" data-ensemble="true"></canvas><span class="metric-label">F future latent L2</span><span class="metric-value"></span></div>
-          <div class="metric"><canvas data-metric="forward_dot_z" data-axis="signed" data-ensemble="true"></canvas><span class="metric-label">F · z</span><span class="metric-value"></span></div>
-          <div class="metric"><canvas data-metric="discriminator_probability" data-axis="probability"></canvas><span class="metric-label">D expert-likeness</span><span class="metric-value"></span></div>
-          <div class="metric"><canvas data-metric="discriminator_q" data-axis="signed" data-ensemble="true"></canvas><span class="metric-label">QD</span><span class="metric-value"></span></div>
-        </div>
+    <section class="panel left">
+      <div class="video-panel"><div id="video-wrap">
+        <video id="video" preload="auto" muted playsinline></video>
+        <div id="trial-grid" aria-label="10 by 10 trial selector"></div>
+      </div></div>
+      <div class="metrics">
+          <div class="metric"><canvas data-metric="backward_dot_z" data-axis="signed"></canvas><span class="metric-label">B(s) · z</span><span class="metric-value"></span><span class="metric-gt-value"></span></div>
+          <div class="metric"><canvas data-metric="forward_dot_z" data-ground-truth="forward_dot_z_ground_truth" data-axis="signed" data-ensemble="true"></canvas><span class="metric-label">F · z</span><span class="metric-value"></span><span class="metric-gt-value"></span></div>
+          <div class="metric"><canvas data-metric="discriminator_probability" data-axis="probability"></canvas><span class="metric-label">D expert-likeness</span><span class="metric-value"></span><span class="metric-gt-value"></span></div>
+          <div class="metric"><canvas data-metric="discriminator_q" data-ground-truth="discriminator_q_ground_truth" data-axis="signed" data-ensemble="true"></canvas><span class="metric-label">QD</span><span class="metric-value"></span><span class="metric-gt-value"></span></div>
       </div>
     </section>
+    <section class="panel right"><canvas id="cube" aria-label="Rotatable PCA cube"></canvas></section>
   </main>
   <footer>
     <input id="timeline" type="range" min="0" max="100" step="1" value="0" aria-label="Timeline">
@@ -95,10 +82,10 @@
     'use strict';
     const DATA_URL = '../../artifacts/bfm-zero-latent-inspector/data.json';
     const $ = selector => document.querySelector(selector);
-    const state = { data:null, run:null, frame:0, selected:new Set(), focused:null, yaw:-0.55, pitch:0.28, playing:false, gesture:null, metricSeries:null, metricMode:'geometry' };
+    const state = { data:null, run:null, frame:0, selected:new Set(), focused:null, yaw:-0.55, pitch:0.28, playing:false, gesture:null, metricSeries:null };
     const video=$('#video'), grid=$('#trial-grid'), select=$('#run-select'), timeline=$('#timeline');
-    const timeLabel=$('#time-label'), selectionLabel=$('#selection-label'), sphere=$('#sphere'), tooltip=$('#tooltip');
-    const metricCanvases=()=>[...document.querySelectorAll(`[data-mode-panel="${state.metricMode}"] .metric canvas`)];
+    const timeLabel=$('#time-label'), selectionLabel=$('#selection-label'), cube=$('#cube'), tooltip=$('#tooltip');
+    const metricCanvases=()=>[...document.querySelectorAll('.metric canvas')];
 
     function fitCanvas(canvas) {
       const dpr=window.devicePixelRatio||1, rect=canvas.getBoundingClientRect();
@@ -111,54 +98,61 @@
       const x=cy*p[0]+sy*p[2], z=-sy*p[0]+cy*p[2];
       return [x,cp*p[1]-sp*z,sp*p[1]+cp*z];
     }
-    function spherePoint(p,w,h) { const r=Math.min(w,h)*.39, q=rotate(p); return [w/2+q[0]*r,h/2-q[1]*r,q[2]]; }
-    function drawSphere() {
-      const [ctx,w,h]=fitCanvas(sphere); ctx.clearRect(0,0,w,h);
-      const r=Math.min(w,h)*.39,cx=w/2,cy=h/2;
-      ctx.strokeStyle='rgba(145,160,180,.18)'; ctx.lineWidth=1;
-      ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
-      const line=(points)=>{ctx.beginPath();points.forEach((p,i)=>{const q=spherePoint(p,w,h);i?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1]);});ctx.stroke();};
-      for(let lat=-60;lat<=60;lat+=30){const a=lat*Math.PI/180,pts=[];for(let i=0;i<=72;i++){const t=i*Math.PI/36;pts.push([Math.cos(a)*Math.cos(t),Math.sin(a),Math.cos(a)*Math.sin(t)]);}line(pts);}
-      for(let lon=0;lon<180;lon+=30){const a=lon*Math.PI/180,pts=[];for(let i=0;i<=72;i++){const t=-Math.PI/2+i*Math.PI/72;pts.push([Math.cos(t)*Math.cos(a),Math.sin(t),Math.cos(t)*Math.sin(a)]);}line(pts);}
+    function cubePoint(p,w,h) { const r=Math.min(w,h)*.36/16, q=rotate(p); return [w/2+q[0]*r,h/2-q[1]*r,q[2]]; }
+    function drawCube() {
+      const [ctx,w,h]=fitCanvas(cube); ctx.clearRect(0,0,w,h);
+      const project=p=>cubePoint(p,w,h), line=(a,b)=>{const p=project(a),q=project(b);ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(q[0],q[1]);ctx.stroke();};
+      const vertices=[];for(const x of [-16,16])for(const y of [-16,16])for(const z of [-16,16])vertices.push([x,y,z]);
+      const edges=[];for(let i=0;i<vertices.length;i++)for(let j=i+1;j<vertices.length;j++){let changes=0;for(let k=0;k<3;k++)if(vertices[i][k]!==vertices[j][k])changes++;if(changes===1)edges.push([vertices[i],vertices[j]]);}
+      edges.sort((a,b)=>(rotate(a[0])[2]+rotate(a[1])[2])-(rotate(b[0])[2]+rotate(b[1])[2]));
+      ctx.strokeStyle='rgba(145,160,180,.38)';ctx.lineWidth=1;for(const edge of edges)line(edge[0],edge[1]);
+      const axes=[{axis:0,label:'X (PC1)',color:'#d98383'},{axis:1,label:'Y (PC2)',color:'#7fc99a'},{axis:2,label:'Z (PC3)',color:'#78a9d6'}];
+      ctx.font='11px system-ui,sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
+      for(const item of axes){const origin=[-16,-16,-16],end=[-16,-16,-16];end[item.axis]=16;ctx.strokeStyle=item.color;ctx.fillStyle=item.color;ctx.lineWidth=1.4;line(origin,end);
+        for(const tick of [-16,-8,0,8,16]){const p=[-16,-16,-16];p[item.axis]=tick;const q=project(p);ctx.beginPath();ctx.arc(q[0],q[1],2,0,Math.PI*2);ctx.fill();const offset=item.axis===1?[-18,0]:item.axis===0?[0,13]:[13,0];ctx.fillText(String(tick),Math.max(18,Math.min(w-18,q[0]+offset[0])),Math.max(12,Math.min(h-12,q[1]+offset[1])));}
+        const q=project(end),offset=item.axis===1?[0,-22]:item.axis===0?[34,16]:[34,-8];ctx.font='600 12px system-ui,sans-serif';ctx.fillText(item.label,Math.max(40,Math.min(w-40,q[0]+offset[0])),Math.max(18,Math.min(h-18,q[1]+offset[1])));ctx.font='11px system-ui,sans-serif';
+      }
       if(!state.run||(!state.selected.size&&state.focused===null)) return;
       const background=[];
-      for(const idx of state.selected){const trial=state.run.trials[idx];for(let f=0;f<trial.xyz.length;f+=2){const q=spherePoint(trial.xyz[f],w,h);background.push({x:q[0],y:q[1],z:q[2],color:trial.color});}}
+      for(const idx of state.selected){const trial=state.run.trials[idx];for(let f=0;f<trial.xyz.length;f+=2){const q=cubePoint(trial.xyz[f],w,h);background.push({x:q[0],y:q[1],z:q[2],color:trial.color});}}
       background.sort((a,b)=>a.z-b.z); ctx.globalAlpha=.12;
       for(const p of background){ctx.fillStyle=p.color;ctx.beginPath();ctx.arc(p.x,p.y,1.3,0,Math.PI*2);ctx.fill();}
       if(state.focused!==null){const trial=state.run.trials[state.focused];
-        ctx.globalAlpha=.13;ctx.fillStyle=trial.color;for(let f=state.frame+1;f<trial.xyz.length;f++){const p=spherePoint(trial.xyz[f],w,h);ctx.beginPath();ctx.arc(p[0],p[1],1.5,0,Math.PI*2);ctx.fill();}
-        ctx.globalAlpha=.9;ctx.strokeStyle=trial.color;ctx.lineWidth=2;ctx.beginPath();for(let f=0;f<=state.frame;f++){const p=spherePoint(trial.xyz[f],w,h);f?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]);}ctx.stroke();
-        ctx.fillStyle=trial.color;for(let f=0;f<=state.frame;f++){const p=spherePoint(trial.xyz[f],w,h);ctx.beginPath();ctx.arc(p[0],p[1],2,0,Math.PI*2);ctx.fill();}
+        ctx.globalAlpha=.13;ctx.fillStyle=trial.color;for(let f=state.frame+1;f<trial.xyz.length;f++){const p=cubePoint(trial.xyz[f],w,h);ctx.beginPath();ctx.arc(p[0],p[1],1.5,0,Math.PI*2);ctx.fill();}
+        ctx.globalAlpha=.9;ctx.strokeStyle=trial.color;ctx.lineWidth=2;ctx.beginPath();for(let f=0;f<=state.frame;f++){const p=cubePoint(trial.xyz[f],w,h);f?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]);}ctx.stroke();
+        ctx.fillStyle=trial.color;for(let f=0;f<=state.frame;f++){const p=cubePoint(trial.xyz[f],w,h);ctx.beginPath();ctx.arc(p[0],p[1],2,0,Math.PI*2);ctx.fill();}
       }
       ctx.globalAlpha=1;
-      for(const idx of state.selected){const trial=state.run.trials[idx],p=spherePoint(trial.xyz[state.frame],w,h);ctx.strokeStyle='white';ctx.lineWidth=2;ctx.beginPath();ctx.arc(p[0],p[1],6,0,Math.PI*2);ctx.stroke();ctx.fillStyle=trial.color;ctx.beginPath();ctx.arc(p[0],p[1],4,0,Math.PI*2);ctx.fill();}
+      for(const idx of state.selected){const trial=state.run.trials[idx],p=cubePoint(trial.xyz[state.frame],w,h);ctx.strokeStyle='white';ctx.lineWidth=2;ctx.beginPath();ctx.arc(p[0],p[1],6,0,Math.PI*2);ctx.stroke();ctx.fillStyle=trial.color;ctx.beginPath();ctx.arc(p[0],p[1],4,0,Math.PI*2);ctx.fill();}
     }
     function median(values){values.sort((a,b)=>a-b);const m=values.length>>1;return values.length%2?values[m]:(values[m-1]+values[m])/2;}
-    function trialMetric(trial,key,ensemble){
+    function trialMetric(trial,key,ensemble,groundTruthKey){
       const values=trial[key];if(!ensemble)return {mean:values,low:null,high:null};
-      return {mean:values.map(v=>(v[0]+v[1])/2),low:values.map(v=>Math.min(v[0],v[1])),high:values.map(v=>Math.max(v[0],v[1]))};
+      return {mean:values.map(v=>(v[0]+v[1])/2),low:values.map(v=>Math.min(v[0],v[1])),high:values.map(v=>Math.max(v[0],v[1])),groundTruth:groundTruthKey?trial[groundTruthKey]:null};
     }
     function updateMetricSeries(){
       if(!state.run){state.metricSeries=null;return;}
-      if(state.focused!==null){const t=state.run.trials[state.focused];state.metricSeries=Object.fromEntries(metricCanvases().map(c=>[c.dataset.metric,trialMetric(t,c.dataset.metric,c.dataset.ensemble==='true')]));return;}
+      if(state.focused!==null){const t=state.run.trials[state.focused];state.metricSeries=Object.fromEntries(metricCanvases().map(c=>[c.dataset.metric,trialMetric(t,c.dataset.metric,c.dataset.ensemble==='true',c.dataset.groundTruth)]));return;}
       if(!state.selected.size){state.metricSeries=null;return;}
-      state.metricSeries={};for(const c of metricCanvases()){const key=c.dataset.metric,ensemble=c.dataset.ensemble==='true',mean=[],low=[],high=[];for(let f=0;f<state.run.frames;f++){const rows=[...state.selected].map(i=>trialMetric(state.run.trials[i],key,ensemble));mean.push(median(rows.map(r=>r.mean[f])));if(ensemble){low.push(median(rows.map(r=>r.low[f])));high.push(median(rows.map(r=>r.high[f])));}}state.metricSeries[key]={mean,low:ensemble?low:null,high:ensemble?high:null};}
+      state.metricSeries={};for(const c of metricCanvases()){const key=c.dataset.metric,ensemble=c.dataset.ensemble==='true',groundTruthKey=c.dataset.groundTruth,mean=[],low=[],high=[],groundTruth=[];for(let f=0;f<state.run.frames;f++){const rows=[...state.selected].map(i=>trialMetric(state.run.trials[i],key,ensemble,groundTruthKey));mean.push(median(rows.map(r=>r.mean[f])));if(ensemble){low.push(median(rows.map(r=>r.low[f])));high.push(median(rows.map(r=>r.high[f])));}if(groundTruthKey)groundTruth.push(median(rows.map(r=>r.groundTruth[f])));}state.metricSeries[key]={mean,low:ensemble?low:null,high:ensemble?high:null,groundTruth:groundTruthKey?groundTruth:null};}
     }
     function percentile(values,p){const sorted=[...values].sort((a,b)=>a-b);return sorted[Math.min(sorted.length-1,Math.max(0,Math.floor((sorted.length-1)*p)))];}
     function drawMetrics(){
-      for(const canvas of metricCanvases()){const [ctx,w,h]=fitCanvas(canvas),key=canvas.dataset.metric,valueNode=canvas.parentElement.querySelector('.metric-value');ctx.clearRect(0,0,w,h);
-        const series=state.metricSeries&&state.metricSeries[key];if(!series){valueNode.textContent='—';canvas.parentElement.classList.add('empty');ctx.fillStyle='#8190a4';ctx.textAlign='center';ctx.fillText('No selected trials',w/2,h/2);continue;}
-        canvas.parentElement.classList.remove('empty');const values=series.mean,left=9,right=w-9,bottom=h-12,plotTop=28,axis=canvas.dataset.axis;
-        const extent=series.low?[...series.low,...series.high]:values;let lo,hi;if(axis==='probability'){lo=0;hi=1;}else if(axis==='positive'){lo=0;hi=Math.max(percentile(extent,.99),1e-6);}else{lo=percentile(extent,.01);hi=percentile(extent,.99);lo=Math.min(lo,0);hi=Math.max(hi,0);if(hi-lo<1e-6){lo-=1e-3;hi+=1e-3;}}
+      for(const canvas of metricCanvases()){const [ctx,w,h]=fitCanvas(canvas),key=canvas.dataset.metric,valueNode=canvas.parentElement.querySelector('.metric-value'),groundTruthNode=canvas.parentElement.querySelector('.metric-gt-value');ctx.clearRect(0,0,w,h);
+        const series=state.metricSeries&&state.metricSeries[key];if(!series){valueNode.textContent='—';groundTruthNode.textContent='';canvas.parentElement.classList.add('empty');ctx.fillStyle='#8190a4';ctx.textAlign='center';ctx.fillText('No selected trials',w/2,h/2);continue;}
+        canvas.parentElement.classList.remove('empty');const values=series.mean,left=9,right=w-9,bottom=h-12,plotTop=series.groundTruth?52:38,axis=canvas.dataset.axis;
+        const extent=series.low?[...series.low,...series.high]:[...values];if(series.groundTruth)extent.push(...series.groundTruth);let lo,hi;if(axis==='probability'){lo=0;hi=1;}else if(axis==='positive'){lo=0;hi=Math.max(percentile(extent,.99),1e-6);}else{lo=percentile(extent,.01);hi=percentile(extent,.99);lo=Math.min(lo,0);hi=Math.max(hi,0);if(hi-lo<1e-6){lo-=1e-3;hi+=1e-3;}}
         const xy=(v,i)=>[left+i/(values.length-1)*(right-left),bottom-(Math.max(lo,Math.min(hi,v))-lo)/(hi-lo)*(bottom-plotTop)];
         if(lo<=0&&hi>=0){const y=xy(0,0)[1];ctx.strokeStyle='rgba(130,145,165,.28)';ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(right,y);ctx.stroke();}
         if(series.low){ctx.fillStyle='rgba(92,151,205,.20)';ctx.beginPath();series.high.forEach((v,i)=>{const p=xy(v,i);i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]);});for(let i=series.low.length-1;i>=0;i--){const p=xy(series.low[i],i);ctx.lineTo(p[0],p[1]);}ctx.closePath();ctx.fill();}
         ctx.strokeStyle='#9db3cb';ctx.lineWidth=1.4;ctx.beginPath();values.forEach((v,i)=>{const p=xy(v,i);i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]);});ctx.stroke();
+        if(series.groundTruth){ctx.strokeStyle='#f2b84b';ctx.lineWidth=1.5;ctx.beginPath();series.groundTruth.forEach((v,i)=>{const p=xy(v,i);i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]);});ctx.stroke();}
         const x=left+state.frame/(values.length-1)*(right-left);ctx.strokeStyle='rgba(255,255,255,.8)';ctx.beginPath();ctx.moveTo(x,plotTop);ctx.lineTo(x,bottom);ctx.stroke();
-        valueNode.textContent=series.low?`${values[state.frame].toFixed(3)} [${series.low[state.frame].toFixed(3)}, ${series.high[state.frame].toFixed(3)}]`:values[state.frame].toFixed(3);
+        valueNode.textContent=series.low?`pred ${values[state.frame].toFixed(3)} [${series.low[state.frame].toFixed(3)}, ${series.high[state.frame].toFixed(3)}]`:values[state.frame].toFixed(3);
+        groundTruthNode.textContent=series.groundTruth?`GT ${series.groundTruth[state.frame].toFixed(3)}`:'';
       }
     }
-    function render(){drawSphere();drawMetrics();timeLabel.textContent=`${(state.frame/state.run.fps).toFixed(2)} s / ${state.run.duration_s.toFixed(2)} s · frame ${state.frame}`;selectionLabel.textContent=`${state.selected.size}/100 selected${state.focused!==null?' · focused '+state.run.trials[state.focused].run_id:''}`;}
+    function render(){if(!state.run)return;drawCube();drawMetrics();timeLabel.textContent=`${(state.frame/state.run.fps).toFixed(2)} s / ${state.run.duration_s.toFixed(2)} s · frame ${state.frame}`;selectionLabel.textContent=`${state.selected.size}/100 selected${state.focused!==null?' · focused '+state.run.trials[state.focused].run_id:''}`;}
     function setFrame(frame,syncVideo=true){state.frame=Math.max(0,Math.min(state.run.frames-1,Math.round(frame)));timeline.value=state.frame;if(syncVideo&&Math.abs(video.currentTime-state.frame/state.run.fps)>.01)video.currentTime=state.frame/state.run.fps;render();}
     function refreshCells(){[...grid.children].forEach((cell,i)=>{cell.classList.toggle('selected',state.selected.has(i));cell.classList.toggle('focused',state.focused===i);});}
     function changeSelection(index){state.selected.has(index)?state.selected.delete(index):state.selected.add(index);refreshCells();updateMetricSeries();render();}
@@ -174,10 +168,9 @@
     timeline.addEventListener('input',()=>{pause();setFrame(Number(timeline.value),true);});
     video.addEventListener('ended',()=>{state.playing=false;setFrame(state.run.frames-1,false);});
     select.addEventListener('change',()=>loadRun(Number(select.value)));
-    document.querySelectorAll('.metric-toggle button').forEach(button=>button.addEventListener('click',()=>{state.metricMode=button.dataset.mode;document.querySelectorAll('.metric-toggle button').forEach(node=>node.classList.toggle('active',node===button));document.querySelectorAll('[data-mode-panel]').forEach(panel=>panel.hidden=panel.dataset.modePanel!==state.metricMode);updateMetricSeries();render();}));
     function loadRun(index){pause();state.run=state.data.runs[index];state.frame=0;state.focused=null;state.selected=new Set(state.run.trials.map(t=>t.index));video.src=state.run.video_url;timeline.max=state.run.frames-1;timeline.value=0;buildGrid();updateMetricSeries();setFrame(0,true);}
     window.addEventListener('keydown',e=>{if(e.ctrlKey||e.metaKey||e.altKey||!state.run)return;const handled=['Space','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code);if(handled)e.preventDefault();if(e.code==='Space')togglePlay();else if(e.code==='ArrowDown'){pause();setFrame(0);}else if(e.code==='ArrowLeft'){pause();setFrame(state.frame-1);}else if(e.code==='ArrowRight'){pause();setFrame(state.frame+1);}else if(e.code==='KeyA'){if(state.selected.size===state.run.trials.length)state.selected.clear();else state.selected=new Set(state.run.trials.map(t=>t.index));refreshCells();updateMetricSeries();render();}else if(e.code==='KeyP')toggleOrientation('prone');else if(e.code==='KeyS')toggleOrientation('supine');else if(e.code==='KeyL')toggleOrientation('lateral');else if(e.code==='KeyO')toggleOrientation('other');});
-    let sphereDrag=null;sphere.addEventListener('pointerdown',e=>{if(e.button!==0)return;sphere.setPointerCapture(e.pointerId);sphereDrag={x:e.clientX,y:e.clientY,yaw:state.yaw,pitch:state.pitch};sphere.classList.add('dragging');});sphere.addEventListener('pointermove',e=>{if(!sphereDrag)return;state.yaw=sphereDrag.yaw+(e.clientX-sphereDrag.x)*.01;state.pitch=Math.max(-1.45,Math.min(1.45,sphereDrag.pitch+(e.clientY-sphereDrag.y)*.01));drawSphere();});const endSphere=()=>{sphereDrag=null;sphere.classList.remove('dragging');};sphere.addEventListener('pointerup',endSphere);sphere.addEventListener('pointercancel',endSphere);
+    let cubeDrag=null;cube.addEventListener('pointerdown',e=>{if(e.button!==0)return;cube.setPointerCapture(e.pointerId);cubeDrag={x:e.clientX,y:e.clientY,yaw:state.yaw,pitch:state.pitch};cube.classList.add('dragging');});cube.addEventListener('pointermove',e=>{if(!cubeDrag)return;state.yaw=cubeDrag.yaw+(e.clientX-cubeDrag.x)*.01;state.pitch=Math.max(-1.45,Math.min(1.45,cubeDrag.pitch+(e.clientY-cubeDrag.y)*.01));drawCube();});const endCube=()=>{cubeDrag=null;cube.classList.remove('dragging');};cube.addEventListener('pointerup',endCube);cube.addEventListener('pointercancel',endCube);
     window.addEventListener('resize',render);
     fetch(DATA_URL).then(response=>{if(!response.ok)throw new Error(`${response.status} ${response.statusText}`);return response.json();}).then(data=>{state.data=data;data.runs.forEach((run,i)=>{const option=document.createElement('option');option.value=i;option.textContent=run.label;select.appendChild(option);});loadRun(0);}).catch(error=>{document.body.innerHTML=`<pre style="padding:24px;color:#ff9b9b">Unable to load ${DATA_URL}\n${String(error)}\n\nServe the repository root with: python -m http.server 8000</pre>`;});
   })();

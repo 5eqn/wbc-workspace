@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import subprocess
@@ -14,6 +15,7 @@ import numpy as np
 import torch
 
 import bfm_zero_fallen_recovery_eval as recovery
+from bfm_zero_trial_sources import aligned_fast_actions, load_fast_source, load_stage2_source
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +24,8 @@ FALLEN_Z_M = 0.45
 RECOVERY_Z_M = 0.75
 RECOVERY_DWELL_S = 0.5
 LATENT_DIM = 256
+DISCOUNT = 0.98
+DISCRIMINATOR_EPS = 1e-7
 COLORS = {
     "prone": "#4C78A8",
     "supine": "#E45756",
@@ -30,17 +34,24 @@ COLORS = {
 }
 RUN_SPECS = (
     {
-        "id": "newmodel-fullstage1-bfm-zero-20260714a",
-        "label": "Random initial states · 100",
-        "summary": "logs/bfm-zero-fallen-recovery/newmodel-fullstage1-bfm-zero-20260714a/stage2/summary.json",
-        "video": "artifacts/bfm-zero-fallen-recovery/newmodel-fullstage1-bfm-zero-20260714a/stage3/tiled_runs.mp4",
+        "id": "oldmodel-fullstage1-bfm-zero-20260716a",
+        "label": "Old model · random initial states · 100",
+        "stage3_summary": "artifacts/bfm-zero-fallen-recovery/oldmodel-fullstage1-bfm-zero-20260716a/stage3/summary.json",
+        "video": "artifacts/bfm-zero-fallen-recovery/oldmodel-fullstage1-bfm-zero-20260716a/stage3/tiled_runs.mp4",
         "frames": 101,
     },
     {
-        "id": "newmodel-induced-bfm-zero-20260714b-velocity-default",
-        "label": "Induced fall · 100",
-        "summary": "logs/bfm-zero-fallen-recovery/newmodel-induced-bfm-zero-20260714b-velocity-default/stage2/summary.json",
-        "video": "artifacts/bfm-zero-fallen-recovery/newmodel-induced-bfm-zero-20260714b-velocity-default/stage3/tiled_runs.mp4",
+        "id": "oldmodel-induced-bfm-zero-20260716b-velocity-default",
+        "label": "Old model · induced fall · 100",
+        "stage3_summary": "artifacts/bfm-zero-fallen-recovery/oldmodel-induced-bfm-zero-20260716b-velocity-default/stage3/summary.json",
+        "video": "artifacts/bfm-zero-fallen-recovery/oldmodel-induced-bfm-zero-20260716b-velocity-default/stage3/tiled_runs.mp4",
+        "frames": 201,
+    },
+    {
+        "id": "lafan1-60m-step192m-128x1-20260717",
+        "label": "LAFAN1 60M · 192M transitions · induced fall · 100",
+        "stage3_summary": "artifacts/bfm-zero-fast-induced/lafan1-60m-step192m-128x1-20260717/stage3/summary.json",
+        "video": "artifacts/bfm-zero-fast-induced/lafan1-60m-step192m-128x1-20260717/stage3/tiled_runs.mp4",
         "frames": 201,
     },
 )
@@ -73,27 +84,20 @@ def probe_video(path: Path, expected_frames: int) -> None:
         )
 
 
-def validate_and_load_runs(spec: dict[str, Any]) -> tuple[dict[str, Any], list[tuple[str, dict[str, Any], Any, Any]]]:
-    summary_path = REPO_ROOT / spec["summary"]
+def load_stage3_source(spec: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+    summary_path = REPO_ROOT / spec["stage3_summary"]
     summary = load_json(summary_path)
-    paths = [REPO_ROOT / str(path) for path in summary.get("run_summaries", [])]
-    if len(paths) != 100:
-        raise ValueError(f"{summary_path}: expected 100 run summaries, got {len(paths)}")
-    loaded = []
-    for index, path in enumerate(paths):
-        expected_id = f"run_{index:03d}"
-        if path.parent.name != expected_id:
-            raise ValueError(f"{summary_path}: entry {index} is {path.parent.name}, expected {expected_id}")
-        run_summary = load_json(path)
-        trajectory_path = REPO_ROOT / str(run_summary["trajectory_path"])
-        trajectory = np.load(trajectory_path)
-        required = {"time_s", "qpos", "qvel", "root_z"}
-        if not required.issubset(trajectory.files):
-            raise ValueError(f"{trajectory_path}: missing {sorted(required - set(trajectory.files))}")
-        telemetry_path = REPO_ROOT / str(run_summary["telemetry_path"])
-        telemetry = np.load(telemetry_path)
-        loaded.append((expected_id, run_summary, trajectory, telemetry))
-    return summary, loaded
+    if summary.get("source_kind") == "fast_replay_v2":
+        source = load_fast_source(REPO_ROOT / summary["source_path"], REPO_ROOT)
+    else:
+        stage2_summary = REPO_ROOT / summary.get("stage2_summary", "")
+        source = load_stage2_source(stage2_summary.parent, REPO_ROOT)
+    selected = [trial.attempt_id for trial in source.trials]
+    if summary.get("selected_attempt_ids", selected) != selected:
+        raise ValueError(f"{summary_path}: selected attempts differ from the validated source")
+    if len(source.trials) != 100:
+        raise ValueError(f"{summary_path}: expected exactly 100 selected trials")
+    return summary, source
 
 
 def orientation_from_qpos(qpos: np.ndarray) -> str:
@@ -128,6 +132,24 @@ def recovery_end(root_z: np.ndarray, start: int) -> int:
 
 def move_observation(observation: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
     return {key: value.to(device=device) for key, value in observation.items()}
+
+
+def discounted_ground_truth(signal: np.ndarray, *, next_step_reward: bool) -> np.ndarray:
+    """Return an infinite discounted sum, holding the final signal forever."""
+    signal = np.asarray(signal, dtype=np.float64)
+    if signal.ndim != 1 or not len(signal) or not np.isfinite(signal).all():
+        raise ValueError(f"invalid ground-truth signal: {signal.shape}")
+    result = np.empty_like(signal)
+    result[-1] = signal[-1] / (1.0 - DISCOUNT)
+    for step in range(len(signal) - 2, -1, -1):
+        reward_index = step + 1 if next_step_reward else step
+        result[step] = signal[reward_index] + DISCOUNT * result[step + 1]
+    expected = signal[1:] if next_step_reward else signal[:-1]
+    if not np.allclose(result[:-1], expected + DISCOUNT * result[1:], atol=1e-10, rtol=1e-12):
+        raise ValueError("discounted ground-truth recurrence validation failed")
+    if not np.isclose(result[-1], signal[-1] / (1.0 - DISCOUNT), atol=1e-10, rtol=1e-12):
+        raise ValueError("discounted ground-truth tail validation failed")
+    return result
 
 
 def extract_run_latents(
@@ -188,7 +210,6 @@ def extract_model_diagnostics(
     telemetry: Any,
     goal_z_np: np.ndarray,
     frame_count: int,
-    gamma: float = 0.98,
 ) -> dict[str, np.ndarray]:
     required = {
         "simulator_tick", "sim_time_s", "state", "last_action", "history_actor",
@@ -248,50 +269,85 @@ def extract_model_diagnostics(
     f = np.moveaxis(forward.detach().cpu().numpy().astype(np.float64), 0, 1)
     d = discriminator.detach().cpu().numpy().reshape(-1).astype(np.float64)
     qd = np.moveaxis(critic.detach().cpu().numpy().astype(np.float64), 0, 1).reshape(len(indices), 2)
-    future = np.zeros_like(b)
-    for step in range(len(b) - 2, -1, -1):
-        future[step] = b[step + 1] + gamma * future[step + 1]
-    recurrence_error = np.max(np.abs(future[:-1] - b[1:] - gamma * future[1:])) if len(b) > 1 else 0.0
-    if recurrence_error > 1e-5:
-        raise ValueError(f"future recurrence error {recurrence_error}")
-    l2 = np.linalg.norm(f - future[:, None, :], axis=-1)
-    dot = np.sum(f * goal_z_np[None, None, :], axis=-1)
+    backward_dot = np.sum(b * goal_z_np[None, :], axis=-1)
+    forward_dot = np.sum(f * goal_z_np[None, None, :], axis=-1)
+    discriminator_reward = np.log(np.clip(d, DISCRIMINATOR_EPS, 1.0 - DISCRIMINATOR_EPS)) - np.log1p(
+        -np.clip(d, DISCRIMINATOR_EPS, 1.0 - DISCRIMINATOR_EPS)
+    )
+    forward_ground_truth = discounted_ground_truth(backward_dot, next_step_reward=True)
+    discriminator_ground_truth = discounted_ground_truth(discriminator_reward, next_step_reward=False)
     frame_times = np.arange(frame_count, dtype=np.float64) / FPS
     control_time = sim_time - trajectory_sim_time[0]
     frame_indices = np.clip(np.searchsorted(control_time, frame_times, side="left"), 0, len(control_time) - 1)
     outputs = {
-        "forward_future_l2": l2[frame_indices],
-        "forward_dot_z": dot[frame_indices],
+        "backward_dot_z": backward_dot[frame_indices],
+        "forward_dot_z": forward_dot[frame_indices],
+        "forward_dot_z_ground_truth": forward_ground_truth[frame_indices],
         "discriminator_probability": d[frame_indices],
         "discriminator_q": qd[frame_indices],
+        "discriminator_q_ground_truth": discriminator_ground_truth[frame_indices],
     }
-    if outputs["forward_future_l2"].shape != (frame_count, 2) or outputs["discriminator_q"].shape != (frame_count, 2):
+    if outputs["backward_dot_z"].shape != (frame_count,) or outputs["discriminator_probability"].shape != (frame_count,):
+        raise ValueError("B/D frame shape validation failed")
+    if outputs["forward_dot_z"].shape != (frame_count, 2) or outputs["discriminator_q"].shape != (frame_count, 2):
         raise ValueError("F/QD frame shape validation failed")
+    if outputs["forward_dot_z_ground_truth"].shape != (frame_count,) or outputs["discriminator_q_ground_truth"].shape != (frame_count,):
+        raise ValueError("F/QD ground-truth frame shape validation failed")
     if not all(np.isfinite(value).all() for value in outputs.values()):
         raise ValueError("non-finite model diagnostic")
-    if np.any(outputs["forward_future_l2"] < 0) or np.any((outputs["discriminator_probability"] < 0) | (outputs["discriminator_probability"] > 1)):
-        raise ValueError("L2 or discriminator range validation failed")
+    if np.any((outputs["discriminator_probability"] < 0) | (outputs["discriminator_probability"] > 1)):
+        raise ValueError("discriminator range validation failed")
     return outputs
 
 
-def anomaly_metrics(latent: np.ndarray, fallen_frame: int | None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    dot = np.sum(latent[1:] * latent[:-1], axis=1, dtype=np.float64) / float(LATENT_DIM)
-    angles = np.zeros(len(latent), dtype=np.float64)
-    angles[1:] = np.arccos(np.clip(dot, -1.0, 1.0))
-    speed = angles * FPS
-    cumulative = np.zeros(len(latent), dtype=np.float64)
-    tortuosity = np.ones(len(latent), dtype=np.float64)
-    if fallen_frame is not None:
-        cumulative[fallen_frame:] = np.cumsum(angles[fallen_frame:])
-        origin = latent[fallen_frame].astype(np.float64)
-        direct_dot = latent[fallen_frame:].astype(np.float64) @ origin / float(LATENT_DIM)
-        direct = np.arccos(np.clip(direct_dot, -1.0, 1.0))
-        tortuosity[fallen_frame:] = cumulative[fallen_frame:] / np.maximum(direct, 1e-4)
-        tortuosity[fallen_frame] = 1.0
-    for name, values in (("angular speed", speed), ("cumulative path", cumulative), ("tortuosity", tortuosity)):
-        if not np.isfinite(values).all() or np.any(values < 0.0):
-            raise ValueError(f"non-finite or negative {name}")
-    return speed, cumulative, tortuosity
+def extract_fast_model_data(
+    latent_model: Any,
+    device: torch.device,
+    trial: Any,
+    goal_z_np: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    observation = move_observation(
+        {key: torch.from_numpy(np.asarray(value, dtype=np.float32)) for key, value in trial.observations.items()},
+        device,
+    )
+    action_np = aligned_fast_actions(trial)
+    action = torch.from_numpy(action_np).to(device)
+    goal_z = torch.from_numpy(np.broadcast_to(goal_z_np, (401, LATENT_DIM)).copy()).to(device)
+    with torch.inference_mode():
+        backward = latent_model.backward_map(observation)
+        latent = latent_model.project_z(backward)
+        forward = latent_model.forward_map(observation, goal_z, action)
+        discriminator = latent_model.discriminator(observation, goal_z)
+        critic = latent_model.critic(observation, goal_z, action)
+    latent_np = latent.detach().cpu().numpy().astype(np.float32)
+    b = backward.detach().cpu().numpy().astype(np.float64)
+    f = np.moveaxis(forward.detach().cpu().numpy().astype(np.float64), 0, 1)
+    d = discriminator.detach().cpu().numpy().reshape(-1).astype(np.float64)
+    qd = np.moveaxis(critic.detach().cpu().numpy().astype(np.float64), 0, 1).reshape(401, 2)
+    if latent_np.shape != (401, LATENT_DIM):
+        raise ValueError(f"{trial.run_id}: invalid fast latent shape {latent_np.shape}")
+    backward_dot = np.sum(b * goal_z_np[None, :], axis=-1)
+    forward_dot = np.sum(f * goal_z_np[None, None, :], axis=-1)
+    clipped_d = np.clip(d, DISCRIMINATOR_EPS, 1.0 - DISCRIMINATOR_EPS)
+    discriminator_reward = np.log(clipped_d) - np.log1p(-clipped_d)
+    display = np.arange(0, 401, 2)
+    outputs = {
+        "backward_dot_z": backward_dot[display],
+        "forward_dot_z": forward_dot[display],
+        "forward_dot_z_ground_truth": discounted_ground_truth(
+            backward_dot, next_step_reward=True
+        )[display],
+        "discriminator_probability": d[display],
+        "discriminator_q": qd[display],
+        "discriminator_q_ground_truth": discounted_ground_truth(
+            discriminator_reward, next_step_reward=False
+        )[display],
+    }
+    if latent_np.shape[0] != 401 or action_np.shape[0] != 401:
+        raise ValueError(f"{trial.run_id}: fast 401-state/action alignment failed")
+    if not np.isfinite(latent_np).all() or not all(np.isfinite(value).all() for value in outputs.values()):
+        raise ValueError(f"{trial.run_id}: non-finite fast model output")
+    return latent_np[display], np.asarray(trial.qpos, dtype=np.float32)[display, 2], outputs
 
 
 def fit_projection(records: list[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray]:
@@ -316,14 +372,10 @@ def fit_projection(records: list[dict[str, Any]]) -> tuple[np.ndarray, np.ndarra
 
 def project_record(record: dict[str, Any], mean: np.ndarray, components: np.ndarray) -> np.ndarray:
     scores = (record["latent"].astype(np.float64) - mean) @ components.T
-    norms = np.linalg.norm(scores, axis=1)
-    invalid = np.flatnonzero(~np.isfinite(scores).all(axis=1) | ~np.isfinite(norms) | (norms < 1e-8))
+    invalid = np.flatnonzero(~np.isfinite(scores).all(axis=1) | (np.abs(scores) > 16.0).any(axis=1))
     if len(invalid):
-        raise ValueError(f"invalid 3D PCA score for {record['run_id']} frame {int(invalid[0])}")
-    xyz = scores / norms[:, None]
-    if float(np.max(np.abs(np.linalg.norm(xyz, axis=1) - 1.0))) >= 1e-5:
-        raise ValueError(f"unit sphere projection failed for {record['run_id']}")
-    return xyz
+        raise ValueError(f"non-finite or out-of-cube PCA score for {record['run_id']} frame {int(invalid[0])}")
+    return scores
 
 
 def generate(device_arg: str, output: Path) -> None:
@@ -342,82 +394,103 @@ def generate(device_arg: str, output: Path) -> None:
     joint_names = [str(name) for name in policy["isaac_joint_names"]]
     joint_qpos_ids, joint_qvel_ids, _ = recovery.build_joint_mappings(rt, model, joint_names)
     body_ids, _, extend_parent_body_id = recovery.build_body_ids(rt, model)
-    first_summary = load_json(REPO_ROOT / RUN_SPECS[0]["summary"])
-    model_metadata = dict(first_summary["model"])
-    checkpoint_path = Path(model_metadata["checkpoint_path"])
-    goal_context_path = Path(model_metadata["goal_context_path"])
-    goal_context = rt.joblib.load(goal_context_path)
-    goal_z = np.asarray(goal_context[recovery.DEFAULT_GOAL_KEY], dtype=np.float32).reshape(-1)
-    if goal_z.shape != (LATENT_DIM,) or abs(float(np.linalg.norm(goal_z)) - 16.0) > 1e-4:
-        raise ValueError(f"invalid pinned goal z: shape={goal_z.shape}, norm={np.linalg.norm(goal_z)}")
-    latent_model = rt.load_model_from_checkpoint_dir(str(checkpoint_path), device=str(device))
-    latent_model.eval()
-
-    records: list[dict[str, Any]] = []
     groups: list[dict[str, Any]] = []
     for spec in RUN_SPECS:
         probe_video(REPO_ROOT / spec["video"], int(spec["frames"]))
-        summary, loaded = validate_and_load_runs(spec)
-        if summary["model"]["checkpoint_sha256"] != model_metadata["checkpoint_sha256"] or summary["model"]["actor_onnx_sha256"] != model_metadata["actor_onnx_sha256"]:
-            raise ValueError(f"{spec['id']} uses different model artifacts")
+        stage3_summary, source = load_stage3_source(spec)
+        model_metadata = dict(source.model)
+        checkpoint_path = Path(model_metadata["checkpoint_path"])
+        if source.goal_z is None:
+            goal_context = rt.joblib.load(Path(model_metadata["goal_context_path"]))
+            goal_z = np.asarray(goal_context[source.goal_key], dtype=np.float32).reshape(-1)
+        else:
+            goal_z = np.asarray(source.goal_z, dtype=np.float32).reshape(-1)
+        if goal_z.shape != (LATENT_DIM,) or abs(float(np.linalg.norm(goal_z)) - 16.0) > 1e-4:
+            raise ValueError(f"{spec['id']}: invalid goal z: shape={goal_z.shape}, norm={np.linalg.norm(goal_z)}")
+        goal_hash = hashlib.sha256(goal_z.tobytes()).hexdigest()
+        if stage3_summary.get("goal_z_sha256", goal_hash) != goal_hash:
+            raise ValueError(f"{spec['id']}: Stage 3 goal latent hash mismatch")
+        latent_model = rt.load_model_from_checkpoint_dir(str(checkpoint_path), device=str(device))
+        latent_model.eval()
         group_records = []
         print(f"Extracting {spec['id']} on {device}...", flush=True)
-        for index, (run_id, _summary, trajectory, telemetry) in enumerate(loaded):
-            latent, root_z = extract_run_latents(
-                rt, latent_model, device, model, data, joint_qpos_ids, joint_qvel_ids,
-                body_ids, extend_parent_body_id, trajectory, int(spec["frames"]),
-            )
+        for index, trial in enumerate(source.trials):
+            trajectory = {
+                "time_s": trial.time_s,
+                "sim_time_s": trial.metadata.get("sim_time_s", trial.time_s),
+                "qpos": trial.qpos,
+                "qvel": trial.qvel,
+                "root_z": np.asarray(trial.qpos)[:, 2],
+            }
+            if source.source_kind == "fast_replay_v2":
+                latent, root_z, diagnostics = extract_fast_model_data(
+                    latent_model, device, trial, goal_z
+                )
+            else:
+                latent, root_z = extract_run_latents(
+                    rt, latent_model, device, model, data, joint_qpos_ids, joint_qvel_ids,
+                    body_ids, extend_parent_body_id, trajectory, int(spec["frames"]),
+                )
+                with np.load(Path(trial.metadata["telemetry_path"])) as telemetry:
+                    diagnostics = extract_model_diagnostics(
+                        rt, latent_model, device, model, data, joint_qpos_ids, joint_qvel_ids,
+                        body_ids, extend_parent_body_id, trajectory, telemetry, goal_z, int(spec["frames"]),
+                    )
             fallen = np.flatnonzero(root_z < FALLEN_Z_M)
             fallen_frame = int(fallen[0]) if len(fallen) else None
-            raw_time_s = np.asarray(trajectory["time_s"], dtype=np.float32)
-            raw_root_z = np.asarray(trajectory["root_z"], dtype=np.float32)
-            raw_qpos = np.asarray(trajectory["qpos"], dtype=np.float32)
+            raw_time_s = np.asarray(trial.time_s, dtype=np.float32)
+            raw_root_z = np.asarray(trial.qpos, dtype=np.float32)[:, 2]
+            raw_qpos = np.asarray(trial.qpos, dtype=np.float32)
             first_second = np.flatnonzero(
                 (raw_time_s <= raw_time_s[0] + 1.0 + 1e-8) & np.isfinite(raw_root_z)
             )
             lowest_index = int(first_second[np.argmin(raw_root_z[first_second])]) if len(first_second) else None
             orientation = orientation_from_qpos(raw_qpos[lowest_index]) if lowest_index is not None else "other"
-            speed, cumulative, tortuosity = anomaly_metrics(latent, fallen_frame)
-            diagnostics = extract_model_diagnostics(
-                rt, latent_model, device, model, data, joint_qpos_ids, joint_qvel_ids,
-                body_ids, extend_parent_body_id, trajectory, telemetry, goal_z, int(spec["frames"]),
-            )
             record = {
-                "index": index, "run_id": run_id, "orientation": orientation,
+                "index": index, "run_id": trial.run_id, "attempt_id": trial.attempt_id,
+                "orientation": orientation,
                 "fallen_frame": fallen_frame, "latent": latent, "root_z": root_z,
-                "angular_speed": speed, "cumulative": cumulative, "tortuosity": tortuosity,
                 **diagnostics,
             }
-            records.append(record)
             group_records.append(record)
             if (index + 1) % 10 == 0:
                 print(f"  {index + 1}/100", flush=True)
-        groups.append({"spec": spec, "records": group_records})
+        mean, components = fit_projection(group_records)
+        groups.append(
+            {
+                "spec": spec,
+                "records": group_records,
+                "mean": mean,
+                "components": components,
+                "source": source,
+                "model": model_metadata,
+                "goal_hash": goal_hash,
+            }
+        )
 
-    mean, components = fit_projection(records)
     output_runs = []
     for group in groups:
         spec = group["spec"]
         trials = []
         counts = {name: 0 for name in COLORS}
         for record in group["records"]:
-            xyz = project_record(record, mean, components)
+            xyz = project_record(record, group["mean"], group["components"])
             counts[record["orientation"]] += 1
             trials.append(
                 {
                     "index": record["index"],
+                    "attempt_id": record["attempt_id"],
                     "run_id": record["run_id"],
                     "orientation": record["orientation"],
                     "color": COLORS[record["orientation"]],
                     "fallen_frame": record["fallen_frame"],
                     "xyz": xyz.round(7).tolist(),
-                    "angular_speed_rad_s": record["angular_speed"].round(7).tolist(),
-                    "cumulative_path_rad": record["cumulative"].round(7).tolist(),
-                    "tortuosity": record["tortuosity"].round(7).tolist(),
-                    "forward_future_l2": record["forward_future_l2"].round(7).tolist(),
+                    "backward_dot_z": record["backward_dot_z"].round(7).tolist(),
                     "forward_dot_z": record["forward_dot_z"].round(7).tolist(),
+                    "forward_dot_z_ground_truth": record["forward_dot_z_ground_truth"].round(7).tolist(),
                     "discriminator_probability": record["discriminator_probability"].round(7).tolist(),
                     "discriminator_q": record["discriminator_q"].round(7).tolist(),
+                    "discriminator_q_ground_truth": record["discriminator_q_ground_truth"].round(7).tolist(),
                 }
             )
         output_runs.append(
@@ -427,22 +500,41 @@ def generate(device_arg: str, output: Path) -> None:
                 "duration_s": (int(spec["frames"]) - 1) / FPS,
                 "frames": int(spec["frames"]), "orientation_counts": counts,
                 "no_fall_count": sum(trial["fallen_frame"] is None for trial in trials),
+                "source_kind": group["source"].source_kind,
+                "model": group["model"],
+                "goal_key": group["source"].goal_key,
+                "goal_z_sha256": group["goal_hash"],
+                "projection": {
+                    "method": "dataset-local centered PCA via NumPy SVD; raw component scores",
+                    "latent_dim": LATENT_DIM,
+                    "output_dim": 3,
+                    "axes": ["X (PC1)", "Y (PC2)", "Z (PC3)"],
+                    "cube_bounds": [-16, 16],
+                    "ticks": [-16, -8, 0, 8, 16],
+                    "mean": group["mean"].round(9).tolist(),
+                    "components": group["components"].round(9).tolist(),
+                    "fit_rule": "first root_z < 0.45 m through recovery dwell end; otherwise trajectory end",
+                },
                 "trials": trials,
             }
         )
     payload = {
         "model_diagnostics": {
-            **model_metadata,
-            "gamma": 0.98,
             "model_frequency_hz": 50,
             "display_frequency_hz": FPS,
-            "future_target": "G_t = B_(t+1) + 0.98 G_(t+1), with G_last = 0 and finite-rollout truncation",
+            "discount": DISCOUNT,
+            "backward_score": "raw backward_map(observation) dot pinned goal latent z",
+            "forward_score": "each forward_map(observation, z, action) head dot pinned goal latent z",
+            "forward_ground_truth": "G_F[t] = B(s[t+1]) dot z + 0.98 G_F[t+1]",
+            "discriminator_reward": "r_D[t] = log(D[t]) - log(1 - D[t]), with D clipped to [1e-7, 1 - 1e-7]",
+            "discriminator_ground_truth": "G_D[t] = r_D[t] + 0.98 G_D[t+1]",
+            "tail_rule": "raw B dot z and D probability hold their final observed values forever",
             "ensemble": "F and QD heads are parallel estimators from one training run, not separate seeds",
         },
         "projection": {
-            "method": "shared centered PCA via NumPy SVD, then per-point unit normalization",
-            "latent_dim": LATENT_DIM, "output_dim": 3,
-            "fit_rule": "first root_z < 0.45 m through first 0.5 s sustained root_z > 0.75 m window end; otherwise trajectory end",
+            "method": "independent centered PCA per dataset",
+            "cube_bounds": [-16, 16],
+            "cross_dataset_comparable": False,
         },
         "runs": output_runs,
     }

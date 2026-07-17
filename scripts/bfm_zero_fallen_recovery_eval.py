@@ -18,6 +18,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from bfm_zero_trial_sources import Trial, load_fast_source, load_stage2_source
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BFM_ZERO_DEPLOY_ROOT = REPO_ROOT / "thirdparties" / "BFM-Zero-deploy"
@@ -1291,74 +1293,104 @@ def run_stage2_replay(args: argparse.Namespace, manifest: dict[str, Any], layout
                 run_summaries.append(existing)
                 success_count += int(bool(existing["success"]))
                 continue
-        ready_file = run_dir / "sim_ready.json"
-        start_flag = run_dir / "start_eval.flag"
-        done_file = run_dir / "eval_done.json"
-        trajectory_path = run_dir / "trajectory.npz"
-        summary_path = run_dir / "summary.json"
         state_path = REPO_ROOT / str(state["state_path"])
-        low_state_port = args.port_base + run_idx * 2
-        low_cmd_port = args.port_base + run_idx * 2 + 1
-        robot_config_path, scene_config_path = write_runtime_configs(
-            run_dir,
-            low_state_port,
-            low_cmd_port,
-            disable_elastic_band=True,
-        )
+        retry_errors: list[str] = []
+        run_summary: dict[str, Any] | None = None
+        for attempt_idx in range(int(args.max_attempts_per_run)):
+            attempt_dir = run_dir / "attempts" / f"attempt_{attempt_idx:03d}"
+            attempt_dir.mkdir(parents=True, exist_ok=True)
+            ready_file = attempt_dir / "sim_ready.json"
+            start_flag = attempt_dir / "start_eval.flag"
+            done_file = attempt_dir / "eval_done.json"
+            trajectory_path = attempt_dir / "trajectory.npz"
+            attempt_summary_path = attempt_dir / "summary.json"
+            attempt_slot = run_idx * max(int(args.max_attempts_per_run), 1) + attempt_idx
+            low_state_port = args.port_base + attempt_slot * 2
+            low_cmd_port = args.port_base + attempt_slot * 2 + 1
+            robot_config_path, scene_config_path = write_runtime_configs(
+                attempt_dir,
+                low_state_port,
+                low_cmd_port,
+                disable_elastic_band=True,
+            )
 
-        sim = launch_sim_capture(
-            run_dir,
-            "replay",
-            robot_config_path,
-            scene_config_path,
-            [
-                "--ready-file",
-                str(ready_file),
-                "--start-flag",
-                str(start_flag),
-                "--done-file",
-                str(done_file),
-                "--summary-path",
-                str(summary_path),
-                "--trajectory-path",
-                str(trajectory_path),
-                "--initial-state",
-                str(state_path),
-                "--fallen-z",
-                f"{args.fallen_z:.6f}",
-                "--recovery-z",
-                f"{args.recovery_z:.6f}",
-                "--horizon-s",
-                f"{args.horizon_s:.6f}",
-                "--goal-key",
-                args.goal_key,
-                "--source-state-id",
-                str(state["state_id"]),
-            ],
-        )
-        deployer: ManagedProcess | None = None
-        try:
-            wait_for_path(ready_file, 10.0, "simulator ready file")
-            deployer = launch_deployer(run_dir, robot_config_path, args.policy_ready_timeout_s, args)
-            goal_index = advance_policy_to_goal(deployer, args.goal_key, args.policy_ready_timeout_s, args.runtime_task_config)
-            touch(start_flag)
-            deployer.send("]")
-            deployer.wait_for_marker(f"Switch to goal={args.goal_key}", args.policy_ready_timeout_s)
-            wait_for_path(done_file, args.horizon_s + 20.0, f"stage2 done file for run {run_idx}")
-        finally:
-            if deployer is not None:
-                deployer.terminate()
-            sim.terminate()
+            sim = launch_sim_capture(
+                attempt_dir,
+                "replay",
+                robot_config_path,
+                scene_config_path,
+                [
+                    "--ready-file",
+                    str(ready_file),
+                    "--start-flag",
+                    str(start_flag),
+                    "--done-file",
+                    str(done_file),
+                    "--summary-path",
+                    str(attempt_summary_path),
+                    "--trajectory-path",
+                    str(trajectory_path),
+                    "--initial-state",
+                    str(state_path),
+                    "--fallen-z",
+                    f"{args.fallen_z:.6f}",
+                    "--recovery-z",
+                    f"{args.recovery_z:.6f}",
+                    "--horizon-s",
+                    f"{args.horizon_s:.6f}",
+                    "--goal-key",
+                    args.goal_key,
+                    "--source-state-id",
+                    str(state["state_id"]),
+                ],
+            )
+            deployer: ManagedProcess | None = None
+            try:
+                wait_for_path(ready_file, 10.0, "simulator ready file")
+                deployer = launch_deployer(attempt_dir, robot_config_path, args.policy_ready_timeout_s, args)
+                goal_index = advance_policy_to_goal(
+                    deployer, args.goal_key, args.policy_ready_timeout_s, args.runtime_task_config
+                )
+                touch(start_flag)
+                deployer.send("]")
+                deployer.wait_for_marker(f"Switch to goal={args.goal_key}", args.policy_ready_timeout_s)
+                wait_for_path(done_file, args.horizon_s + 20.0, f"stage2 done file for run {run_idx}")
+                run_summary = load_json(attempt_summary_path)
+            except TimeoutError as exc:
+                error_path = attempt_dir / "orchestrator_error.json"
+                write_json(
+                    error_path,
+                    {
+                        "created_at": now_iso(),
+                        "run_index": run_idx,
+                        "attempt_index": attempt_idx,
+                        "error": str(exc),
+                    },
+                )
+                retry_errors.append(repo_rel(error_path))
+            finally:
+                if deployer is not None:
+                    deployer.terminate()
+                sim.terminate()
+            if run_summary is not None:
+                break
 
-        run_summary = load_json(summary_path)
+        if run_summary is None:
+            raise RuntimeError(
+                f"Replay run {run_idx} timed out in all {args.max_attempts_per_run} attempts"
+            )
+
         run_summary["goal_selection_index"] = goal_index
         run_summary["source_state"] = state
         run_summary["trajectory_path"] = repo_rel(trajectory_path)
-        run_summary["summary_path"] = repo_rel(summary_path)
-        run_summary["simulator_log"] = repo_rel(run_dir / "simulator_stdout.log")
-        run_summary["deployer_log"] = repo_rel(run_dir / "deployer_stdout.log")
-        run_summary["telemetry_path"] = repo_rel(run_dir / "telemetry.npz")
-        write_json(summary_path, run_summary)
+        run_summary["summary_path"] = repo_rel(existing_summary_path)
+        run_summary["simulator_log"] = repo_rel(attempt_dir / "simulator_stdout.log")
+        run_summary["deployer_log"] = repo_rel(attempt_dir / "deployer_stdout.log")
+        run_summary["telemetry_path"] = repo_rel(attempt_dir / "telemetry.npz")
+        run_summary["attempt_index"] = attempt_idx
+        run_summary["attempt_count"] = attempt_idx + 1
+        run_summary["retry_errors"] = retry_errors
+        write_json(existing_summary_path, run_summary)
         run_summaries.append(run_summary)
         success_count += int(bool(run_summary["success"]))
 
@@ -1969,18 +2001,31 @@ def tune_disturbance(args: argparse.Namespace) -> int:
 
 def stage3(args: argparse.Namespace) -> int:
     rt = runtime()
-    stage2_dir = Path(args.stage2_dir)
-    summary = load_json(stage2_summary_path(stage2_dir))
-    run_id = str(summary["run_id"])
+    if bool(args.stage2_dir) == bool(args.fast_run_dir):
+        raise ValueError("exactly one of --stage2-dir or --fast-run-dir is required")
+    if args.fast_run_dir:
+        source = load_fast_source(Path(args.fast_run_dir), REPO_ROOT)
+        stage3_dir = REPO_ROOT / "artifacts" / "bfm-zero-fast-induced" / source.source_id / "stage3"
+    else:
+        source = load_stage2_source(Path(args.stage2_dir), REPO_ROOT)
+        stage3_dir = build_layout(source.source_id).stage3_dir
+    stage3_dir.mkdir(parents=True, exist_ok=True)
+    run_id = source.source_id
+    summary = source.metadata["summary"]
     layout = build_layout(run_id)
-    stage3_dir = layout.stage3_dir
-    stage1_manifest_rel = summary.get("stage1_manifest")
+    if source.source_kind == "fast_replay_v2":
+        layout = EvalLayout(
+            run_id,
+            source.source_path,
+            stage3_dir.parent,
+            stage3_dir.parent / "stage1",
+            stage3_dir.parent / "stage2",
+            stage3_dir,
+        )
+    stage1_manifest_rel = summary.get("stage1_manifest") if source.source_kind == "stage2" else None
     stage1_manifest = load_json(REPO_ROOT / str(stage1_manifest_rel)) if stage1_manifest_rel else None
-
-    run_summary_paths = [REPO_ROOT / str(path) for path in summary["run_summaries"]]
-    run_summaries = [load_json(path) for path in run_summary_paths]
-    if not run_summaries:
-        raise ValueError("Stage 2 summary has no run summaries")
+    trials = list(source.trials)
+    run_summaries = [dict(trial.metadata.get("run_summary") or {}) for trial in trials]
 
     model = rt.mujoco.MjModel.from_xml_path(str(BFM_ZERO_DEPLOY_ROOT / "data" / "robots" / "g1" / "scene_29dof_freebase.xml"))
     data = rt.mujoco.MjData(model)
@@ -1988,17 +2033,31 @@ def stage3(args: argparse.Namespace) -> int:
     joint_names = [str(name) for name in policy_config["isaac_joint_names"]]
     joint_qpos_ids, joint_qvel_ids, _ = build_joint_mappings(rt, model, joint_names)
     body_ids, pelvis_body_id, extend_parent_body_id = build_body_ids(rt, model)
-    target_body_pos = load_target_body_positions(rt, model, data, str(summary["goal_key"]), joint_qpos_ids, body_ids, extend_parent_body_id)
-    model_metadata = dict(summary.get("model") or {})
-    goal_context_path = Path(model_metadata.get("goal_context_path", BFM_ZERO_DEPLOY_ROOT / "model/goal_inference/goal_reaching.pkl"))
-    goal_latents = rt.joblib.load(goal_context_path)
-    target_goal_latent = rt.np.asarray(goal_latents[str(summary["goal_key"])], dtype=rt.np.float32).reshape(-1)
+    target_body_pos = load_target_body_positions(
+        rt, model, data, source.goal_key, joint_qpos_ids, body_ids, extend_parent_body_id
+    )
+    model_metadata = dict(source.model)
+    if source.goal_z is None:
+        goal_context_path = Path(
+            model_metadata.get(
+                "goal_context_path", BFM_ZERO_DEPLOY_ROOT / "model/goal_inference/goal_reaching.pkl"
+            )
+        )
+        goal_latents = rt.joblib.load(goal_context_path)
+        target_goal_latent = rt.np.asarray(
+            goal_latents[source.goal_key], dtype=rt.np.float32
+        ).reshape(-1)
+    else:
+        target_goal_latent = rt.np.asarray(source.goal_z, dtype=rt.np.float32).reshape(-1)
     checkpoint_path = Path(model_metadata.get("checkpoint_path", BFM_ZERO_DEPLOY_ROOT / "model/checkpoint"))
     latent_device = "cuda" if rt.torch.cuda.is_available() else "cpu"
     latent_model = rt.load_model_from_checkpoint_dir(str(checkpoint_path), device=latent_device)
     latent_model.eval()
 
-    trajectories = [rt.np.load(REPO_ROOT / str(run_summary["trajectory_path"])) for run_summary in run_summaries]
+    trajectories = [
+        {"time_s": trial.time_s, "qpos": trial.qpos, "qvel": trial.qvel}
+        for trial in trials
+    ]
     time_vectors = [rt.np.asarray(traj["time_s"], dtype=rt.np.float32) for traj in trajectories]
     max_steps = max(int(time_vec.shape[0]) for time_vec in time_vectors)
     reference_idx = max(range(len(time_vectors)), key=lambda idx: int(time_vectors[idx].shape[0]))
@@ -2012,7 +2071,7 @@ def stage3(args: argparse.Namespace) -> int:
     success = rt.np.zeros(num_runs, dtype=bool)
     trajectory_lengths = rt.np.zeros(num_runs, dtype=rt.np.int32)
 
-    for run_idx, (run_summary, traj) in enumerate(zip(run_summaries, trajectories)):
+    for run_idx, (trial, traj) in enumerate(zip(trials, trajectories)):
         qpos = rt.np.asarray(traj["qpos"], dtype=rt.np.float32)
         qvel = rt.np.asarray(traj["qvel"], dtype=rt.np.float32)
         run_steps = int(qpos.shape[0])
@@ -2048,7 +2107,7 @@ def stage3(args: argparse.Namespace) -> int:
         latent_cosine[run_idx, :run_steps] = rt.np.clip(
             (z_batch @ target_goal_latent) / rt.np.maximum(denom, 1e-12), -1.0, 1.0
         )
-        success[run_idx] = bool(run_summary["success"])
+        success[run_idx] = trial.success
 
     metrics_path = stage3_dir / "metrics.npz"
     rt.np.savez_compressed(
@@ -2063,10 +2122,10 @@ def stage3(args: argparse.Namespace) -> int:
 
     success_rate = float(success.mean())
     title_suffix = (
-        f"N={num_runs}, seed={manifest_seed_from_stage2(summary)}, "
-        f"fallen_z<{summary['fallen_z_threshold_m']:.2f} m, "
-        f"recover_z>{summary['recovery_z_threshold_m']:.2f} m, "
-        f"horizon={summary['horizon_s']:.1f} s, success={success_rate:.1%}"
+        f"N={num_runs}, seed={source.seed}, "
+        f"fallen_z<{source.fallen_z_threshold_m:.2f} m, "
+        f"recover_z>{source.recovery_z_threshold_m:.2f} m, "
+        f"horizon={source.horizon_s:.1f} s, success={success_rate:.1%}"
     )
     mpjpe_plot = stage3_dir / "mpjpe_lines.png"
     latent_plot = stage3_dir / "latent_cosine_lines.png"
@@ -2076,12 +2135,12 @@ def stage3(args: argparse.Namespace) -> int:
     write_plot(rt, root_z, time_s, f"BFM-Zero Fallen-Recovery Base Height ({title_suffix})", "Pelvis Height (m)", root_z_plot)
 
     tiled_video = stage3_dir / "tiled_runs.mp4"
-    grid_rows, grid_cols, video_width, video_height = render_tiled_video_from_paths(
+    grid_rows, grid_cols, video_width, video_height = render_tiled_video_from_trials(
         rt,
         model,
         data,
         pelvis_body_id,
-        [REPO_ROOT / str(row["trajectory_path"]) for row in run_summaries],
+        trials,
         args.video_fps,
         args.render_width,
         args.render_height,
@@ -2107,12 +2166,13 @@ def stage3(args: argparse.Namespace) -> int:
 
     latent_min = float(rt.np.nanmin(latent_cosine))
     latent_max = float(rt.np.nanmax(latent_cosine))
-    failed_runs = [row for row in run_summaries if not bool(row["success"])]
+    failed_runs = [row for row in run_summaries if row and not bool(row["success"])]
+    failed_trials = [trial for trial in trials if not trial.success]
     failed_recovery_index = None
     failed_recovery_videos: list[str] = []
     failed_settle_index = None
     failed_settle_videos: list[str] = []
-    if failed_runs and not args.skip_failed_videos:
+    if source.source_kind == "stage2" and failed_runs and not args.skip_failed_videos:
         failed_recovery_index, failed_recovery_videos = render_failed_video_group(
             rt,
             model,
@@ -2142,17 +2202,54 @@ def stage3(args: argparse.Namespace) -> int:
                 "failed_settle_videos_index.json",
                 lambda run_name, state_id: f"{run_name}_{state_id}_settle_1080p.mp4",
             )
+    elif source.source_kind == "fast_replay_v2" and failed_trials and args.render_failed_videos:
+        renderer, camera = build_renderer(
+            rt, model, args.failed_render_width, args.failed_render_height, pelvis_body_id
+        )
+        try:
+            for trial in failed_trials:
+                output_path = stage3_dir / f"{trial.run_id}_1080p.mp4"
+                render_video_from_qpos(
+                    rt,
+                    model,
+                    data,
+                    renderer,
+                    camera,
+                    pelvis_body_id,
+                    trial.qpos,
+                    rt.np.arange(0, len(trial.qpos), 2),
+                    args.video_fps,
+                    output_path,
+                )
+                failed_recovery_videos.append(repo_rel(output_path))
+        finally:
+            renderer.close()
+        failed_recovery_index = stage3_dir / "failed_videos_index.json"
+        write_json(
+            failed_recovery_index,
+            {
+                "source_kind": source.source_kind,
+                "attempt_ids": [trial.attempt_id for trial in failed_trials],
+                "videos": failed_recovery_videos,
+            },
+        )
     summary_payload = {
         "run_id": run_id,
         "created_at": now_iso(),
         "stage": "stage3",
-        "stage2_summary": repo_rel(stage2_summary_path(stage2_dir)),
+        "source_kind": source.source_kind,
+        "source_id": source.source_id,
+        "source_path": repo_rel(source.source_path),
+        "selected_attempt_ids": [trial.attempt_id for trial in trials],
+        "model": model_metadata,
         "num_runs": num_runs,
-        "goal_key": summary["goal_key"],
-        "seed": manifest_seed_from_stage2(summary),
-        "fallen_z_threshold_m": summary["fallen_z_threshold_m"],
-        "recovery_z_threshold_m": summary["recovery_z_threshold_m"],
-        "horizon_s": summary["horizon_s"],
+        "goal_key": source.goal_key,
+        "goal_z": target_goal_latent.tolist(),
+        "goal_z_sha256": hashlib.sha256(target_goal_latent.astype(rt.np.float32).tobytes()).hexdigest(),
+        "seed": source.seed,
+        "fallen_z_threshold_m": source.fallen_z_threshold_m,
+        "recovery_z_threshold_m": source.recovery_z_threshold_m,
+        "horizon_s": source.horizon_s,
         "success_count": int(success.sum()),
         "success_rate": success_rate,
         "video_grid_rows": grid_rows,
@@ -2187,6 +2284,25 @@ def stage3(args: argparse.Namespace) -> int:
             "tiled_video": repo_rel(tiled_video),
         },
     }
+    if source.source_kind == "stage2":
+        summary_payload["stage2_summary"] = repo_rel(Path(source.metadata["summary_path"]))
+    else:
+        summary_payload["fast_manifest"] = repo_rel(Path(source.metadata["manifest_path"]))
+        summary_payload["fast_summary"] = repo_rel(Path(source.metadata["summary_path"]))
+        summary_payload["selected_rows"] = source.metadata["selected_rows"]
+        selected_rounds = sorted(
+            {int(row["round_index"]) for row in source.metadata["selected_rows"]}
+        )
+        summary_payload["source_hashes"] = {
+            "manifest_sha256": sha256_file(Path(source.metadata["manifest_path"])),
+            "summary_sha256": sha256_file(Path(source.metadata["summary_path"])),
+            "round_sha256": {
+                f"round_{round_index:03d}.h5": sha256_file(
+                    source.source_path / f"round_{round_index:03d}.h5"
+                )
+                for round_index in selected_rounds
+            },
+        }
     if stage1_manifest_rel:
         summary_payload["stage1_manifest"] = repo_rel(REPO_ROOT / str(stage1_manifest_rel))
         summary_payload["stage1_summary"] = repo_rel(stage1_summary_path((REPO_ROOT / str(stage1_manifest_rel)).parent))
@@ -2402,6 +2518,41 @@ def render_tiled_video_from_paths(
             sample_indices = rt.np.clip(rt.np.searchsorted(time_s, render_times, side="left"), 0, len(time_s) - 1)
             for frame_idx, sample_idx in enumerate(sample_indices):
                 frames[run_idx, frame_idx] = render_frame(rt, renderer, camera, model, data, pelvis_body_id, qpos[int(sample_idx)])
+    finally:
+        renderer.close()
+    return tile_video(rt, frames, fps, output_path)
+
+
+def render_tiled_video_from_trials(
+    rt: SimpleNamespace,
+    model: Any,
+    data: Any,
+    pelvis_body_id: int,
+    trials: list[Trial],
+    fps: int,
+    render_width: int,
+    render_height: int,
+    output_path: Path,
+) -> tuple[int, int, int, int]:
+    if not trials:
+        raise ValueError("No trials were provided for tiled rendering")
+    max_duration_s = max(float(trial.time_s[-1]) for trial in trials)
+    render_times = rt.np.arange(0.0, max_duration_s + 1e-9, 1.0 / fps, dtype=rt.np.float32)
+    renderer, camera = build_renderer(rt, model, render_width, render_height, pelvis_body_id)
+    frames = rt.np.zeros(
+        (len(trials), len(render_times), render_height, render_width, 3), dtype=rt.np.uint8
+    )
+    try:
+        for run_idx, trial in enumerate(trials):
+            time_s = rt.np.asarray(trial.time_s, dtype=rt.np.float32)
+            qpos = rt.np.asarray(trial.qpos, dtype=rt.np.float32)
+            sample_indices = rt.np.clip(
+                rt.np.searchsorted(time_s, render_times, side="left"), 0, len(time_s) - 1
+            )
+            for frame_idx, sample_idx in enumerate(sample_indices):
+                frames[run_idx, frame_idx] = render_frame(
+                    rt, renderer, camera, model, data, pelvis_body_id, qpos[int(sample_idx)]
+                )
     finally:
         renderer.close()
     return tile_video(rt, frames, fps, output_path)
@@ -3247,8 +3398,18 @@ def build_parser() -> argparse.ArgumentParser:
     p2.add_argument("--run-id", type=str, default=None)
     p2.add_argument("--seed", type=int, default=0)
     p2.add_argument("--goal-key", type=str, default=DEFAULT_GOAL_KEY)
-    p2.add_argument("--model-checkpoint", type=str, default=str(DEFAULT_NEW_CHECKPOINT))
-    p2.add_argument("--actor-onnx", type=str, default=str(DEFAULT_NEW_ACTOR))
+    p2.add_argument(
+        "--model-checkpoint",
+        type=str,
+        default=str(DEFAULT_NEW_CHECKPOINT),
+        help="Checkpoint used to encode the goal; must match --actor-onnx (defaults to the new release)",
+    )
+    p2.add_argument(
+        "--actor-onnx",
+        type=str,
+        default=str(DEFAULT_NEW_ACTOR),
+        help="Closed-loop actor; must match --model-checkpoint (defaults to the new release)",
+    )
     p2.add_argument("--fallen-z", type=float, default=DEFAULT_FALLEN_Z_M)
     p2.add_argument("--recovery-z", type=float, default=DEFAULT_RECOVERY_Z_M)
     p2.add_argument("--horizon-s", type=float, default=DEFAULT_HORIZON_S)
@@ -3280,8 +3441,18 @@ def build_parser() -> argparse.ArgumentParser:
     p2t.add_argument("--run-id", type=str, default=None)
     p2t.add_argument("--seed", type=int, default=0)
     p2t.add_argument("--goal-key", type=str, default=DEFAULT_GOAL_KEY)
-    p2t.add_argument("--model-checkpoint", type=str, default=str(DEFAULT_NEW_CHECKPOINT))
-    p2t.add_argument("--actor-onnx", type=str, default=str(DEFAULT_NEW_ACTOR))
+    p2t.add_argument(
+        "--model-checkpoint",
+        type=str,
+        default=str(DEFAULT_NEW_CHECKPOINT),
+        help="Checkpoint used to encode the goal; must match --actor-onnx (defaults to the new release)",
+    )
+    p2t.add_argument(
+        "--actor-onnx",
+        type=str,
+        default=str(DEFAULT_NEW_ACTOR),
+        help="Closed-loop actor; must match --model-checkpoint (defaults to the new release)",
+    )
     p2t.add_argument("--fallen-z", type=float, default=DEFAULT_FALLEN_Z_M)
     p2t.add_argument("--recovery-z", type=float, default=DEFAULT_RECOVERY_Z_M)
     p2t.add_argument("--horizon-s", type=float, default=DEFAULT_INDUCED_HORIZON_S)
@@ -3309,14 +3480,27 @@ def build_parser() -> argparse.ArgumentParser:
     p2t.add_argument("--angular-velocity-max-rps", type=float, default=DEFAULT_ANGULAR_VELOCITY_MAX_RPS)
     p2t.add_argument("--tuning-gate-max-success-rate", type=float, default=0.5)
 
-    p3 = subparsers.add_parser("stage3", help="Post-process stage2 logs into metrics, plots, and tiled video")
-    p3.add_argument("--stage2-dir", type=str, required=True)
+    p3 = subparsers.add_parser(
+        "stage3", help="Post-process Stage 2 or schema-v2 fast replay into metrics, plots, and tiled video"
+    )
+    p3_source = p3.add_mutually_exclusive_group(required=True)
+    p3_source.add_argument("--stage2-dir", type=str)
+    p3_source.add_argument(
+        "--fast-run-dir",
+        type=str,
+        help="Directory containing manifest.json, summary.json, and schema-v2 round_*.h5 files",
+    )
     p3.add_argument("--video-fps", type=int, default=25)
     p3.add_argument("--render-width", type=int, default=192)
     p3.add_argument("--render-height", type=int, default=108)
     p3.add_argument("--failed-render-width", type=int, default=1920)
     p3.add_argument("--failed-render-height", type=int, default=1080)
     p3.add_argument("--skip-failed-videos", action="store_true", help="Skip optional per-failure 1080p exports")
+    p3.add_argument(
+        "--render-failed-videos",
+        action="store_true",
+        help="Explicitly render optional per-failure videos for fast replay (off by default)",
+    )
 
     p4 = subparsers.add_parser("render-failed-videos", help="Render one 1080p replay video per failed Stage 2 run")
     p4.add_argument("--stage2-dir", type=str, required=True)

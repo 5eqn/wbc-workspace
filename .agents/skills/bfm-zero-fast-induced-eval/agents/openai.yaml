@@ -1,0 +1,4 @@
+interface:
+  display_name: "BFM-Zero Fast Induced Eval"
+  short_description: "Run, inspect, and export fast induced-fall data"
+  default_prompt: "Use $bfm-zero-fast-induced-eval to run, verify, or export a batched BFM-Zero induced-fall evaluation."
