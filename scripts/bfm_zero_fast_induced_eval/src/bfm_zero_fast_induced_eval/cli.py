@@ -5,8 +5,9 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .config import DEFAULT_ACTOR, DEFAULT_CHECKPOINT, DEFAULT_GOALS, OUTPUT_ROOT, EvalConfig
+from .config import OUTPUT_ROOT, EvalConfig
 from .onnx_batch import patch_dynamic_batch, verify_dynamic_batches
+from .providers import DEFAULT_AMP_TORCHSCRIPT, resolve_provider_artifacts
 from .recompute import verify_recomputation
 from .runtime import preflight, run_evaluation
 from .schema import estimated_raw_gib, raw_bytes_per_accepted_trial
@@ -16,9 +17,10 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--actor", type=Path, default=DEFAULT_ACTOR)
-    common.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
-    common.add_argument("--goals", type=Path, default=DEFAULT_GOALS)
+    common.add_argument("--model-provider", choices=("bfm-zero", "legged-lab-amp"), default="bfm-zero")
+    common.add_argument("--actor", type=Path)
+    common.add_argument("--checkpoint", type=Path)
+    common.add_argument("--goals", type=Path)
     common.add_argument("--output-root", type=Path, default=OUTPUT_ROOT)
     common.add_argument(
         "--allow-custom-model",
@@ -43,14 +45,28 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _parser().parse_args()
+    actor, checkpoint, goals = resolve_provider_artifacts(
+        args.model_provider, args.actor, args.checkpoint, args.goals
+    )
+    input_dim = 721 if args.model_provider == "bfm-zero" else 570
     if args.command == "verify-recompute":
         from .runtime import reexec_in_isaac
 
         reexec_in_isaac()
-        result = verify_recomputation(args.round_file, args.checkpoint, args.samples)
+        result = verify_recomputation(args.round_file, checkpoint, args.samples)
     elif args.command == "patch-onnx":
-        patched = patch_dynamic_batch(args.actor, args.output_root / ".onnx-cache")
-        result = {"patched": str(patched), "verification": verify_dynamic_batches(args.actor, patched)}
+        if args.model_provider == "legged-lab-amp":
+            from .runtime import reexec_in_isaac
+
+            reexec_in_isaac()
+        patched = patch_dynamic_batch(actor, args.output_root / ".onnx-cache", input_dim, 29)
+        torchscript = DEFAULT_AMP_TORCHSCRIPT if args.model_provider == "legged-lab-amp" else None
+        result = {
+            "patched": str(patched),
+            "verification": verify_dynamic_batches(
+                actor, patched, input_dim=input_dim, output_dim=29, torchscript=torchscript
+            ),
+        }
     else:
         config = EvalConfig(
             num_envs=getattr(args, "num_envs", 128),
@@ -62,25 +78,28 @@ def main() -> int:
             result = preflight(
                 args.output_root,
                 config,
-                args.actor,
-                args.checkpoint,
-                args.goals,
+                actor,
+                checkpoint,
+                goals,
                 allow_custom_model=args.allow_custom_model,
+                model_provider=args.model_provider,
             )
+            observation_fields = None if args.model_provider == "bfm-zero" else {"provider_input": 570}
             result.update(
-                raw_bytes_per_accepted_trial=raw_bytes_per_accepted_trial(),
-                maximum_raw_gib=estimated_raw_gib(config.num_envs * config.rounds),
+                raw_bytes_per_accepted_trial=raw_bytes_per_accepted_trial(observation_fields),
+                maximum_raw_gib=estimated_raw_gib(config.num_envs * config.rounds, observation_fields),
             )
         else:
             run_id = args.run_id or datetime.now().strftime("%Y%m%dT%H%M%S")
             result = run_evaluation(
                 run_id,
                 config,
-                args.actor,
-                args.checkpoint,
-                args.goals,
+                actor,
+                checkpoint,
+                goals,
                 args.output_root,
                 allow_custom_model=args.allow_custom_model,
+                model_provider=args.model_provider,
             )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

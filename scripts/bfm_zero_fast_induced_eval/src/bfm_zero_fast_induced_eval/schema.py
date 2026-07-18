@@ -13,6 +13,7 @@ GOAL_DIM = 256
 OBSERVATION_FRAMES = 401
 TRANSITIONS = 400
 SCHEMA_VERSION = 2
+AMP_SCHEMA_VERSION = 3
 QPOS_DIM = 36
 QVEL_DIM = 35
 
@@ -118,13 +119,14 @@ def validate_observation(observation: dict[str, np.ndarray], num_envs: int) -> N
             raise ValueError(f"{name} contains non-finite values")
 
 
-def raw_bytes_per_accepted_trial() -> int:
-    observation_floats = OBSERVATION_FRAMES * sum(OBSERVATION_FIELDS.values())
+def raw_bytes_per_accepted_trial(observation_fields: dict[str, int] | None = None) -> int:
+    fields = OBSERVATION_FIELDS if observation_fields is None else observation_fields
+    observation_floats = OBSERVATION_FRAMES * sum(fields.values())
     replay_state_floats = OBSERVATION_FRAMES * sum(REPLAY_STATE_FIELDS.values())
     action_floats = TRANSITIONS * ACTION_DIM
     boundary_bools = TRANSITIONS * 2
     return (observation_floats + replay_state_floats + action_floats) * 4 + boundary_bools
 
 
-def estimated_raw_gib(num_trials: int) -> float:
-    return raw_bytes_per_accepted_trial() * num_trials / 2**30
+def estimated_raw_gib(num_trials: int, observation_fields: dict[str, int] | None = None) -> float:
+    return raw_bytes_per_accepted_trial(observation_fields) * num_trials / 2**30

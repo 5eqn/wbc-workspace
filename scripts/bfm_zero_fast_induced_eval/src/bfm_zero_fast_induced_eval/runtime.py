@@ -28,13 +28,22 @@ from .disturbance import attempt_seed, sample_velocity_disturbance
 from .metrics import trial_metrics, wilson_interval
 from .onnx_batch import patch_dynamic_batch, sha256_file
 from .pose import POSE_CONTRACT, require_reset_identity, require_upright, xyzw_to_wxyz
+from .providers import (
+    AMP_DEFAULT_JOINT_POSITION,
+    DEFAULT_AMP_ENV_CONFIG,
+    DEFAULT_AMP_TORCHSCRIPT,
+    POLICY_JOINT_NAMES,
+    SDK_JOINT_NAMES,
+    BfmZeroProvider,
+    CanonicalSnapshot,
+    LeggedLabAmpProvider,
+    PolicyProvider,
+    action_to_target,
+)
 from .schema import (
-    OBSERVATION_FIELDS,
     REPLAY_STATE_FIELDS,
     SCHEMA_VERSION,
-    actor_input,
     estimated_raw_gib,
-    validate_observation,
 )
 from .storage import read_attempt_summaries, valid_round, write_round_atomic
 
@@ -101,14 +110,20 @@ def preflight(
     output_root: Path,
     config: EvalConfig,
     actor: Path,
-    checkpoint: Path,
-    goals: Path,
+    checkpoint: Path | None,
+    goals: Path | None,
     *,
     allow_custom_model: bool = False,
+    model_provider: str = "bfm-zero",
 ) -> dict[str, Any]:
     config.validate()
-    required = (actor, checkpoint, goals, DEFAULT_MOTION, ISAAC_PYTHON)
-    missing = [str(path) for path in required if not path.exists()]
+    if model_provider == "bfm-zero":
+        required = (actor, checkpoint, goals, DEFAULT_MOTION, ISAAC_PYTHON)
+    elif model_provider == "legged-lab-amp":
+        required = (actor, DEFAULT_AMP_TORCHSCRIPT, DEFAULT_AMP_ENV_CONFIG, DEFAULT_MOTION, ISAAC_PYTHON)
+    else:
+        raise ValueError(f"unknown model provider {model_provider!r}")
+    missing = [str(path) for path in required if path is None or not path.exists()]
     if missing:
         raise FileNotFoundError(f"required paths are missing: {missing}")
     output_root.mkdir(parents=True, exist_ok=True)
@@ -120,6 +135,18 @@ def preflight(
     if conflicts:
         raise RuntimeError("DDS/deployer processes are active:\n" + "\n".join(conflicts))
     actor_hash = sha256_file(actor)
+    if model_provider == "legged-lab-amp":
+        return {
+            "free_gib": free_gib,
+            "maximum_raw_gib": estimated_raw_gib(config.num_envs * config.rounds, {"provider_input": 570}),
+            "actor_sha256": actor_hash,
+            "torchscript_sha256": sha256_file(DEFAULT_AMP_TORCHSCRIPT),
+            "env_config_sha256": sha256_file(DEFAULT_AMP_ENV_CONFIG),
+            "model_policy": "legged-lab-amp-export",
+            "python": platform.python_version(),
+            "checked_at": now_iso(),
+        }
+    assert checkpoint is not None
     model_path = checkpoint / "model/model.safetensors"
     model_hash = sha256_file(model_path)
     known_actor = actor_hash == EXPECTED_ACTOR_SHA256
@@ -188,9 +215,136 @@ def _load_goal(path: Path, key: str) -> np.ndarray:
     return value
 
 
-def _make_environment(config: EvalConfig):
+def _make_environment(config: EvalConfig, model_provider: str = "bfm-zero"):
     from humanoidverse.agents.envs.humanoidverse_isaac import HumanoidVerseIsaacConfig
 
+    def hydra_dict(values: dict[str, float]) -> str:
+        return "{" + ",".join(f"{key}:{value}" for key, value in values.items()) + "}"
+
+    overrides = [
+        "env.config.headless=true",
+        "simulator=isaacsim",
+        "robot=g1/g1_29dof_hard_waist",
+        "robot.control.action_scale=0.25",
+        "obs.root_height_obs=true",
+        "env.config.lie_down_init=false",
+        "env.config.lie_down_init_prob=0.0",
+    ]
+    if model_provider == "bfm-zero":
+        overrides += ["robot.control.action_clip_value=5.0", "robot.control.normalize_action_to=5.0"]
+    else:
+        default_angles = dict(zip(SDK_JOINT_NAMES, AMP_DEFAULT_JOINT_POSITION.tolist(), strict=True))
+        effort = [
+            88,
+            139,
+            88,
+            139,
+            25,
+            25,
+            88,
+            139,
+            88,
+            139,
+            25,
+            25,
+            88,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            5,
+            5,
+            25,
+            25,
+            25,
+            25,
+            25,
+            5,
+            5,
+        ]
+        velocity = [
+            32,
+            20,
+            32,
+            20,
+            37,
+            37,
+            32,
+            20,
+            32,
+            20,
+            37,
+            37,
+            32,
+            37,
+            37,
+            37,
+            37,
+            37,
+            37,
+            37,
+            22,
+            22,
+            37,
+            37,
+            37,
+            37,
+            37,
+            22,
+            22,
+        ]
+        stiffness = {
+            "hip_yaw": 100.0,
+            "hip_roll": 100.0,
+            "hip_pitch": 100.0,
+            "knee": 150.0,
+            "ankle_pitch": 40.0,
+            "ankle_roll": 40.0,
+            "waist_yaw": 200.0,
+            "waist_roll": 40.0,
+            "waist_pitch": 40.0,
+            "shoulder_pitch": 40.0,
+            "shoulder_roll": 40.0,
+            "shoulder_yaw": 40.0,
+            "elbow": 40.0,
+            "wrist_roll": 40.0,
+            "wrist_pitch": 40.0,
+            "wrist_yaw": 40.0,
+        }
+        damping = {
+            "hip_yaw": 2.0,
+            "hip_roll": 2.0,
+            "hip_pitch": 2.0,
+            "knee": 4.0,
+            "ankle_pitch": 2.0,
+            "ankle_roll": 2.0,
+            "waist_yaw": 5.0,
+            "waist_roll": 5.0,
+            "waist_pitch": 5.0,
+            "shoulder_pitch": 1.0,
+            "shoulder_roll": 1.0,
+            "shoulder_yaw": 1.0,
+            "elbow": 1.0,
+            "wrist_roll": 1.0,
+            "wrist_pitch": 1.0,
+            "wrist_yaw": 1.0,
+        }
+        overrides += [
+            "robot.control.action_clip_value=1000000.0",
+            "robot.control.normalize_action=false",
+            "robot.control.normalize_action_to=1000000.0",
+            "robot.control.action_rescale=false",
+            f"robot.init_state.default_joint_angles={hydra_dict(default_angles)}",
+            f"robot.dof_effort_limit_list={effort}",
+            f"robot.dof_vel_limit_list={velocity}",
+            f"robot.dof_armature_list={[0.01] * 29}",
+            f"robot.dof_joint_friction_list={[0.0] * 29}",
+            f"robot.control.stiffness={hydra_dict(stiffness)}",
+            f"robot.control.damping={hydra_dict(damping)}",
+        ]
     env_config = HumanoidVerseIsaacConfig(
         device="cuda:0",
         lafan_tail_path=str(DEFAULT_MOTION),
@@ -201,17 +355,7 @@ def _make_environment(config: EvalConfig):
         include_last_action=True,
         include_history_actor=True,
         root_height_obs=True,
-        hydra_overrides=[
-            "env.config.headless=true",
-            "simulator=isaacsim",
-            "robot=g1/g1_29dof_hard_waist",
-            "robot.control.action_scale=0.25",
-            "robot.control.action_clip_value=5.0",
-            "robot.control.normalize_action_to=5.0",
-            "obs.root_height_obs=true",
-            "env.config.lie_down_init=false",
-            "env.config.lie_down_init_prob=0.0",
-        ],
+        hydra_overrides=overrides,
     )
     wrapped, _ = env_config.build(config.num_envs)
     base = wrapped.base_env
@@ -222,6 +366,56 @@ def _make_environment(config: EvalConfig):
     if bool(base.config.simulator.get("enable_cameras", False)):
         raise RuntimeError("cameras unexpectedly enabled")
     return wrapped
+
+
+def _snapshot(wrapped: Any) -> CanonicalSnapshot:
+    qpos, qvel = wrapped._get_qpos_qvel(to_numpy=True)
+    simulator = wrapped.base_env.simulator
+    body_positions = simulator._rigid_body_pos.detach().cpu().numpy().copy()
+    return CanonicalSnapshot(
+        np.asarray(qpos, dtype=np.float32),
+        np.asarray(qvel, dtype=np.float32),
+        np.asarray(body_positions, dtype=np.float32),
+        tuple(simulator.body_names),
+    )
+
+
+def _validate_amp_runtime(wrapped: Any) -> dict[str, Any]:
+    base = wrapped.base_env
+    actual_names = tuple(base.simulator.dof_names)
+    if actual_names != SDK_JOINT_NAMES:
+        raise RuntimeError(f"AMP joint order mismatch: {actual_names}")
+    native_names = tuple(base.simulator._robot.joint_names)
+    if native_names != POLICY_JOINT_NAMES:
+        raise RuntimeError(f"AMP policy joint order mismatch: {native_names}")
+    default = base.default_dof_pos[0].detach().cpu().numpy()
+    np.testing.assert_allclose(default, AMP_DEFAULT_JOINT_POSITION, rtol=0, atol=1e-7)
+    probe = np.linspace(-1, 1, 29, dtype=np.float32)
+    expected = action_to_target(probe)
+    resolved = default + float(base.config.robot.control.action_scale) * probe
+    np.testing.assert_allclose(resolved, expected, rtol=0, atol=1e-7)
+    return {
+        "canonical_joint_order_match": True,
+        "policy_joint_order_match": True,
+        "default_pose_max_abs_error": float(np.max(np.abs(default - AMP_DEFAULT_JOINT_POSITION))),
+        "target_mapping_probe_max_abs_error": float(np.max(np.abs(resolved - expected))),
+        "supported_matches": [
+            "200 Hz physics",
+            "50 Hz control",
+            "action scale 0.25",
+            "no normalization",
+            "no action rescale",
+            "no effective clipping",
+            "joint defaults",
+            "effort/velocity limits",
+            "armature",
+            "self collision",
+        ],
+        "irreducible_differences": [
+            "HumanoidVerse Isaac articulation fixes solver iterations at 4 position / 0 velocity; "
+            "training used 8 / 4"
+        ],
+    }
 
 
 def _refresh_observation(wrapped: Any) -> dict[str, Any]:
@@ -254,7 +448,7 @@ def _apply_velocity_kicks(
 def _run_one_round(
     wrapped: Any,
     session: Any,
-    goal: np.ndarray,
+    provider: PolicyProvider,
     config: EvalConfig,
     round_index: int,
     actor_hash: str,
@@ -266,14 +460,15 @@ def _run_one_round(
     root_states[..., 3:7] = xyzw_to_wxyz(root_states[..., 3:7])
     target_states["root_states"] = root_states
     observation, reset_state = wrapped.reset(to_numpy=True, target_states=target_states)
-    validate_observation(observation, num_envs)
     require_reset_identity(reset_state["qpos"])
-    input_name = session.get_inputs()[0].name
+    snapshot = _snapshot(wrapped)
+    provider.reset(observation, snapshot)
 
     # Let the controller settle in the known standing pose before starting the trial clock.
     for _ in range(round(config.warmup_s * config.policy_hz)):
-        action = session.run(None, {input_name: actor_input(observation, goal)})[0].astype(np.float32)
+        _, action = provider.infer(observation, snapshot, session)
         observation, _, _, _, _ = wrapped.step(action, to_numpy=True)
+        snapshot = _snapshot(wrapped)
     warmup_qpos, _ = wrapped._get_qpos_qvel(to_numpy=True)
     require_upright(warmup_qpos, "post-warmup")
 
@@ -283,12 +478,12 @@ def _run_one_round(
         for env_index in range(num_envs)
     ]
     observation, replay_state = _apply_velocity_kicks(wrapped, disturbances)
-    validate_observation(observation, num_envs)
+    snapshot = _snapshot(wrapped)
     require_upright(replay_state["qpos"], "post-kick")
 
     trajectories = {
         name: np.empty((num_envs, config.observation_frames, dim), dtype=np.float32)
-        for name, dim in OBSERVATION_FIELDS.items()
+        for name, dim in provider.observation_fields.items()
     }
     trajectories.update(
         {
@@ -301,8 +496,6 @@ def _run_one_round(
         terminated=np.empty((num_envs, config.policy_steps), dtype=np.bool_),
         truncated=np.empty((num_envs, config.policy_steps), dtype=np.bool_),
     )
-    for name in OBSERVATION_FIELDS:
-        trajectories[name][:, 0] = observation[name]
     for name, dim in REPLAY_STATE_FIELDS.items():
         value = np.asarray(replay_state[name], dtype=np.float32)
         if value.shape != (num_envs, dim) or not np.isfinite(value).all():
@@ -321,21 +514,24 @@ def _run_one_round(
     started = time.perf_counter()
     try:
         for step in range(config.policy_steps):
-            action = session.run(None, {input_name: actor_input(observation, goal)})[0].astype(np.float32)
+            model_input, action = provider.infer(observation, snapshot, session)
             if action.shape != (num_envs, 29) or not np.isfinite(action).all():
                 raise ValueError(f"invalid actor action at step {step}: {action.shape}")
+            for name, value in provider.replay_frame(observation, model_input).items():
+                trajectories[name][:, step] = value
             trajectories["action"][:, step] = action
             observation, _, terminated, truncated, info = wrapped.step(action, to_numpy=True)
-            validate_observation(observation, num_envs)
+            snapshot = _snapshot(wrapped)
             trajectories["terminated"][:, step] = terminated
             trajectories["truncated"][:, step] = truncated
-            for name in OBSERVATION_FIELDS:
-                trajectories[name][:, step + 1] = observation[name]
             for name, dim in REPLAY_STATE_FIELDS.items():
                 value = np.asarray(info[name], dtype=np.float32)
                 if value.shape != (num_envs, dim) or not np.isfinite(value).all():
                     raise ValueError(f"invalid {name} at step {step}: {value.shape}")
                 trajectories[name][:, step + 1] = value
+        final_input, _ = provider.infer(observation, snapshot, session)
+        for name, value in provider.replay_frame(observation, final_input).items():
+            trajectories[name][:, -1] = value
     finally:
         simulator.simulate_at_each_physics_step = original_simulate
     elapsed = time.perf_counter() - started
@@ -366,18 +562,27 @@ def _run_one_round(
                 "disturbance": disturbance.as_dict(),
                 "actor_sha256": actor_hash,
                 "checkpoint_sha256": checkpoint_hash,
+                "model_provider": provider.name,
             }
         )
     return trajectories, accepted, attempts, metrics, elapsed
 
 
-def _aggregate(run_dir: Path, config: EvalConfig, session_wall_time_s: float) -> dict[str, Any]:
+def _aggregate(
+    run_dir: Path,
+    config: EvalConfig,
+    session_wall_time_s: float,
+    schema_version: int = SCHEMA_VERSION,
+    observation_fields: dict[str, int] | None = None,
+) -> dict[str, Any]:
     rows = []
     completed = []
     cumulative_rollout_wall_time_s = 0.0
     for round_index in range(config.rounds):
         path = run_dir / f"round_{round_index:03d}.h5"
-        if valid_round(path, round_index):
+        if valid_round(
+            path, round_index, schema_version=schema_version, observation_fields=observation_fields
+        ):
             rows.extend(read_attempt_summaries(path))
             completed.append(round_index)
             import h5py
@@ -410,11 +615,12 @@ def run_evaluation(
     run_id: str,
     config: EvalConfig,
     actor: Path = DEFAULT_ACTOR,
-    checkpoint: Path = DEFAULT_CHECKPOINT,
-    goals: Path = DEFAULT_GOALS,
+    checkpoint: Path | None = DEFAULT_CHECKPOINT,
+    goals: Path | None = DEFAULT_GOALS,
     output_root: Path = OUTPUT_ROOT,
     *,
     allow_custom_model: bool = False,
+    model_provider: str = "bfm-zero",
 ) -> dict[str, Any]:
     reexec_in_isaac()
     import h5py
@@ -431,39 +637,60 @@ def run_evaluation(
         checkpoint,
         goals,
         allow_custom_model=allow_custom_model,
+        model_provider=model_provider,
     )
-    patched = patch_dynamic_batch(actor, output_root / ".onnx-cache")
+    if model_provider == "bfm-zero":
+        assert goals is not None
+        goal = _load_goal(goals, config.goal_key)
+        provider: PolicyProvider = BfmZeroProvider(goal)
+    else:
+        goal = None
+        provider = LeggedLabAmpProvider()
+    patched = patch_dynamic_batch(actor, output_root / ".onnx-cache", provider.input_dim, provider.output_dim)
     providers = ["CUDAExecutionProvider"]
     session = ort.InferenceSession(str(patched), providers=providers)
     if session.get_providers()[0] != "CUDAExecutionProvider":
         raise RuntimeError(f"CUDA ONNX Runtime is required, got {session.get_providers()}")
-    goal = _load_goal(goals, config.goal_key)
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = run_dir / "manifest.json"
     actor_hash = sha256_file(actor)
-    checkpoint_hash = str(preflight_result["checkpoint_sha256"])
+    checkpoint_hash = str(
+        preflight_result.get("checkpoint_sha256") or preflight_result.get("torchscript_sha256")
+    )
+    wrapped = _make_environment(config, model_provider)
+    physics_report = _validate_amp_runtime(wrapped) if model_provider == "legged-lab-amp" else None
     manifest = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": provider.schema_version,
         "replay_schema": {
             "observation_frames": config.observation_frames,
             "transitions": config.policy_steps,
             "replay_hz": config.policy_hz,
             "metric_height_hz": config.physics_hz,
             "state_fields": dict(REPLAY_STATE_FIELDS),
+            "provider_observation_fields": provider.observation_fields,
             "quaternion_order": "wxyz",
         },
         "pose_contract": POSE_CONTRACT,
         "run_id": run_id,
         "created_at": now_iso(),
         "config": config.as_dict(),
-        "goal_z": goal.tolist(),
+        "model_provider": provider.metadata(),
+        "goal_z": goal.tolist() if goal is not None else None,
         "paths": {
             "actor": str(actor.resolve()),
-            "checkpoint": str(checkpoint.resolve()),
-            "goals": str(goals.resolve()),
+            "checkpoint": str(checkpoint.resolve()) if checkpoint is not None else None,
+            "goals": str(goals.resolve()) if goals is not None else None,
+            "torchscript": str(DEFAULT_AMP_TORCHSCRIPT) if model_provider == "legged-lab-amp" else None,
+            "environment_config": str(DEFAULT_AMP_ENV_CONFIG) if model_provider == "legged-lab-amp" else None,
             "dynamic_actor_cache": str(patched.resolve()),
         },
-        "hashes": {"actor_sha256": actor_hash, "checkpoint_sha256": checkpoint_hash},
+        "hashes": {
+            "actor_sha256": actor_hash,
+            "checkpoint_sha256": checkpoint_hash,
+            "torchscript_sha256": preflight_result.get("torchscript_sha256"),
+            "environment_config_sha256": preflight_result.get("env_config_sha256"),
+        },
+        "physics_compatibility": physics_report,
         "runtime_versions": _versions(ort, torch, h5py),
         "preflight": preflight_result,
         "headless": True,
@@ -474,23 +701,35 @@ def run_evaluation(
     }
     if manifest_path.exists():
         previous = json.loads(manifest_path.read_text())
-        for key in ("schema_version", "replay_schema", "pose_contract", "config", "hashes"):
+        for key in (
+            "schema_version",
+            "replay_schema",
+            "pose_contract",
+            "config",
+            "hashes",
+            "model_provider",
+            "physics_compatibility",
+        ):
             if previous.get(key) != manifest[key]:
                 raise RuntimeError(f"cannot resume: manifest {key} differs")
         manifest["created_at"] = previous["created_at"]
     write_json_atomic(manifest_path, manifest)
 
-    wrapped = _make_environment(config)
     started = time.perf_counter()
     try:
         for round_index in range(config.rounds):
             round_path = run_dir / f"round_{round_index:03d}.h5"
             temporary = round_path.with_name(round_path.name + ".tmp")
-            if valid_round(round_path, round_index):
+            if valid_round(
+                round_path,
+                round_index,
+                schema_version=provider.schema_version,
+                observation_fields=provider.observation_fields,
+            ):
                 continue
             temporary.unlink(missing_ok=True)
             trajectories, accepted, attempts, metrics, elapsed = _run_one_round(
-                wrapped, session, goal, config, round_index, actor_hash, checkpoint_hash
+                wrapped, session, provider, config, round_index, actor_hash, checkpoint_hash
             )
             write_round_atomic(
                 round_path,
@@ -500,6 +739,8 @@ def run_evaluation(
                 attempts,
                 metrics,
                 rollout_wall_time_s=elapsed,
+                schema_version=provider.schema_version,
+                observation_fields=provider.observation_fields,
             )
             round_summary = {
                 "round_index": round_index,
@@ -511,10 +752,19 @@ def run_evaluation(
             }
             print(json.dumps(round_summary, sort_keys=True), flush=True)
             write_json_atomic(
-                run_dir / "summary.json", _aggregate(run_dir, config, time.perf_counter() - started)
+                run_dir / "summary.json",
+                _aggregate(
+                    run_dir,
+                    config,
+                    time.perf_counter() - started,
+                    provider.schema_version,
+                    provider.observation_fields,
+                ),
             )
     finally:
         wrapped.close()
-    summary = _aggregate(run_dir, config, time.perf_counter() - started)
+    summary = _aggregate(
+        run_dir, config, time.perf_counter() - started, provider.schema_version, provider.observation_fields
+    )
     write_json_atomic(run_dir / "summary.json", summary)
     return summary

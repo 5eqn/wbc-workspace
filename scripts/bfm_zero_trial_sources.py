@@ -1,4 +1,4 @@
-"""Validated adapters for Stage 2 and schema-v2 fast-evaluator trials."""
+"""Validated adapters for Stage 2 and provider-aware fast-evaluator trials."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Any
 
 TRIAL_LIMIT = 100
 FAST_SCHEMA_VERSION = 2
+FAST_AMP_SCHEMA_VERSION = 3
 FAST_STATE_FRAMES = 401
 FAST_TRANSITIONS = 400
 FAST_OBSERVATION_SHAPES = {
@@ -80,7 +81,9 @@ def _finite(name: str, value: Any) -> Any:
     return array
 
 
-def load_stage2_source(stage2_dir: Path, repo_root: Path, limit: int = TRIAL_LIMIT) -> TrialSource:
+def load_stage2_source(
+    stage2_dir: Path, repo_root: Path, limit: int = TRIAL_LIMIT
+) -> TrialSource:
     import numpy as np
 
     stage2_dir = stage2_dir.resolve()
@@ -102,10 +105,17 @@ def load_stage2_source(stage2_dir: Path, repo_root: Path, limit: int = TRIAL_LIM
         with np.load(trajectory_path) as trajectory:
             required = {"time_s", "qpos", "qvel", "root_z"}
             if not required.issubset(trajectory.files):
-                raise ValueError(f"{trajectory_path}: missing {sorted(required - set(trajectory.files))}")
-            time_s = _finite("time_s", trajectory["time_s"]).astype(np.float32, copy=True)
+                raise ValueError(
+                    f"{trajectory_path}: missing {sorted(required - set(trajectory.files))}"
+                )
+            time_s = _finite("time_s", trajectory["time_s"]).astype(
+                np.float32, copy=True
+            )
             sim_time_s = _finite(
-                "sim_time_s", trajectory["sim_time_s"] if "sim_time_s" in trajectory.files else time_s
+                "sim_time_s",
+                trajectory["sim_time_s"]
+                if "sim_time_s" in trajectory.files
+                else time_s,
             ).astype(np.float64, copy=True)
             qpos = _finite("qpos", trajectory["qpos"]).astype(np.float32, copy=True)
             qvel = _finite("qvel", trajectory["qvel"]).astype(np.float32, copy=True)
@@ -142,7 +152,9 @@ def load_stage2_source(stage2_dir: Path, repo_root: Path, limit: int = TRIAL_LIM
         if len(usable) == limit:
             break
     if len(usable) < limit:
-        raise ValueError(f"{summary_path}: requires at least {limit} usable trials, found {len(usable)}")
+        raise ValueError(
+            f"{summary_path}: requires at least {limit} usable trials, found {len(usable)}"
+        )
     return TrialSource(
         source_id=str(summary["run_id"]),
         source_kind="stage2",
@@ -168,7 +180,9 @@ def _numeric_rounds(run_dir: Path) -> list[tuple[int, Path]]:
     return sorted(rounds)
 
 
-def load_fast_source(fast_run_dir: Path, repo_root: Path, limit: int = TRIAL_LIMIT) -> TrialSource:
+def load_fast_source(
+    fast_run_dir: Path, repo_root: Path, limit: int = TRIAL_LIMIT
+) -> TrialSource:
     import h5py
     import numpy as np
 
@@ -177,22 +191,47 @@ def load_fast_source(fast_run_dir: Path, repo_root: Path, limit: int = TRIAL_LIM
     summary_path = fast_run_dir / "summary.json"
     manifest = _load_json(manifest_path)
     summary = _load_json(summary_path)
-    if int(manifest.get("schema_version", -1)) != FAST_SCHEMA_VERSION:
-        raise ValueError(f"{manifest_path}: schema-v2 is required")
+    schema_version = int(manifest.get("schema_version", -1))
+    provider = dict(manifest.get("model_provider") or {})
+    is_amp = (
+        schema_version == FAST_AMP_SCHEMA_VERSION
+        and provider.get("identity") == "legged-lab-amp"
+    )
+    if schema_version != FAST_SCHEMA_VERSION and not is_amp:
+        raise ValueError(f"{manifest_path}: schema-v2 BFM or schema-v3 AMP is required")
     paths = dict(manifest.get("paths") or {})
     hashes = dict(manifest.get("hashes") or {})
-    checkpoint = _resolve(paths.get("checkpoint", ""), repo_root)
     actor = _resolve(paths.get("actor", ""), repo_root)
-    goals = _resolve(paths.get("goals", ""), repo_root)
-    for name, path in (("checkpoint", checkpoint), ("actor", actor), ("goals", goals)):
+    artifacts = [("actor", actor)]
+    checkpoint = goals = torchscript = env_config = None
+    if is_amp:
+        torchscript = _resolve(paths.get("torchscript", ""), repo_root)
+        env_config = _resolve(paths.get("environment_config", ""), repo_root)
+        artifacts += [("torchscript", torchscript), ("environment_config", env_config)]
+    else:
+        checkpoint = _resolve(paths.get("checkpoint", ""), repo_root)
+        goals = _resolve(paths.get("goals", ""), repo_root)
+        artifacts += [("checkpoint", checkpoint), ("goals", goals)]
+    for name, path in artifacts:
         if not path.exists():
             raise FileNotFoundError(f"Fast-run {name} artifact is missing: {path}")
     if hashes.get("actor_sha256") != _sha256(actor):
         raise ValueError("fast-run actor hash does not match the manifest")
+    if is_amp:
+        if hashes.get("torchscript_sha256") != _sha256(torchscript):
+            raise ValueError("fast-run TorchScript hash does not match the manifest")
+        if hashes.get("environment_config_sha256") != _sha256(env_config):
+            raise ValueError(
+                "fast-run environment config hash does not match the manifest"
+            )
 
-    goal_z = _finite("goal_z", manifest.get("goal_z", [])).astype(np.float32)
-    if goal_z.shape != (256,) or abs(float(np.linalg.norm(goal_z)) - 16.0) > 1e-4:
-        raise ValueError(f"invalid fast-run goal latent: shape={goal_z.shape}, norm={np.linalg.norm(goal_z)}")
+    goal_z = None
+    if not is_amp:
+        goal_z = _finite("goal_z", manifest.get("goal_z", [])).astype(np.float32)
+        if goal_z.shape != (256,) or abs(float(np.linalg.norm(goal_z)) - 16.0) > 1e-4:
+            raise ValueError(
+                f"invalid fast-run goal latent: shape={goal_z.shape}, norm={np.linalg.norm(goal_z)}"
+            )
 
     trials: list[Trial] = []
     selected_rows: list[dict[str, int]] = []
@@ -201,21 +240,28 @@ def load_fast_source(fast_run_dir: Path, repo_root: Path, limit: int = TRIAL_LIM
         raise ValueError(f"{fast_run_dir}: no numeric round_*.h5 files")
     for round_index, round_path in rounds:
         with h5py.File(round_path, "r") as handle:
-            if int(handle.attrs.get("schema_version", -1)) != FAST_SCHEMA_VERSION:
-                raise ValueError(f"{round_path}: schema-v2 is required")
+            if int(handle.attrs.get("schema_version", -1)) != schema_version:
+                raise ValueError(f"{round_path}: schema mismatch")
             if not bool(handle.attrs.get("complete", False)):
                 raise ValueError(f"{round_path}: incomplete round")
             if int(handle.attrs.get("round_index", -1)) != round_index:
                 raise ValueError(f"{round_path}: round index mismatch")
             accepted = np.asarray(handle["attempts/accepted"][:], dtype=np.bool_)
             recovered = np.asarray(handle["attempts/recovered"][:], dtype=np.bool_)
-            metadata = [json.loads(item) for item in handle["attempts/metadata_json"].asstr()[:]]
+            metadata = [
+                json.loads(item) for item in handle["attempts/metadata_json"].asstr()[:]
+            ]
             if accepted.shape != recovered.shape or len(metadata) != len(accepted):
                 raise ValueError(f"{round_path}: malformed attempt metadata")
             accepted_attempts = np.flatnonzero(accepted)
             accepted_count = len(accepted_attempts)
+            observation_shapes = (
+                {"provider_input": (FAST_STATE_FRAMES, 570)}
+                if is_amp
+                else FAST_OBSERVATION_SHAPES
+            )
             expected = {
-                **FAST_OBSERVATION_SHAPES,
+                **observation_shapes,
                 "qpos": (FAST_STATE_FRAMES, 36),
                 "qvel": (FAST_STATE_FRAMES, 35),
                 "action": (FAST_TRANSITIONS, 29),
@@ -223,9 +269,14 @@ def load_fast_source(fast_run_dir: Path, repo_root: Path, limit: int = TRIAL_LIM
             for name, tail in expected.items():
                 if name not in handle or handle[name].shape != (accepted_count, *tail):
                     actual = None if name not in handle else handle[name].shape
-                    raise ValueError(f"{round_path}: {name} shape {actual}, expected {(accepted_count, *tail)}")
+                    raise ValueError(
+                        f"{round_path}: {name} shape {actual}, expected {(accepted_count, *tail)}"
+                    )
             for name in ("terminated", "truncated"):
-                if name not in handle or handle[name].shape != (accepted_count, FAST_TRANSITIONS):
+                if name not in handle or handle[name].shape != (
+                    accepted_count,
+                    FAST_TRANSITIONS,
+                ):
                     actual = None if name not in handle else handle[name].shape
                     raise ValueError(
                         f"{round_path}: {name} shape {actual}, "
@@ -235,20 +286,20 @@ def load_fast_source(fast_run_dir: Path, repo_root: Path, limit: int = TRIAL_LIM
                 attempt = dict(metadata[int(attempt_row)])
                 attempt_id = int(attempt.get("attempt_index", attempt_row))
                 observations = {
-                    name: _finite(f"{round_path}:{name}[{stored_row}]", handle[name][stored_row]).astype(
-                        np.float32, copy=False
-                    )
-                    for name in FAST_OBSERVATION_SHAPES
+                    name: _finite(
+                        f"{round_path}:{name}[{stored_row}]", handle[name][stored_row]
+                    ).astype(np.float32, copy=False)
+                    for name in observation_shapes
                 }
-                qpos = _finite(f"{round_path}:qpos[{stored_row}]", handle["qpos"][stored_row]).astype(
-                    np.float32, copy=False
-                )
-                qvel = _finite(f"{round_path}:qvel[{stored_row}]", handle["qvel"][stored_row]).astype(
-                    np.float32, copy=False
-                )
-                action = _finite(f"{round_path}:action[{stored_row}]", handle["action"][stored_row]).astype(
-                    np.float32, copy=False
-                )
+                qpos = _finite(
+                    f"{round_path}:qpos[{stored_row}]", handle["qpos"][stored_row]
+                ).astype(np.float32, copy=False)
+                qvel = _finite(
+                    f"{round_path}:qvel[{stored_row}]", handle["qvel"][stored_row]
+                ).astype(np.float32, copy=False)
+                action = _finite(
+                    f"{round_path}:action[{stored_row}]", handle["action"][stored_row]
+                ).astype(np.float32, copy=False)
                 trials.append(
                     Trial(
                         source_id=str(manifest["run_id"]),
@@ -270,27 +321,46 @@ def load_fast_source(fast_run_dir: Path, repo_root: Path, limit: int = TRIAL_LIM
                     )
                 )
                 selected_rows.append(
-                    {"attempt_id": attempt_id, "round_index": round_index, "stored_row": stored_row}
+                    {
+                        "attempt_id": attempt_id,
+                        "round_index": round_index,
+                        "stored_row": stored_row,
+                    }
                 )
                 if len(trials) == limit:
                     break
         if len(trials) == limit:
             break
     if len(trials) < limit:
-        raise ValueError(f"{fast_run_dir}: requires at least {limit} usable trials, found {len(trials)}")
+        raise ValueError(
+            f"{fast_run_dir}: requires at least {limit} usable trials, found {len(trials)}"
+        )
     return TrialSource(
         source_id=str(manifest["run_id"]),
-        source_kind="fast_replay_v2",
+        source_kind="fast_replay_v3_amp" if is_amp else "fast_replay_v2",
         source_path=fast_run_dir,
-        goal_key=str(manifest["config"]["goal_key"]),
+        goal_key=str(manifest["config"].get("goal_key", "")) if not is_amp else "",
         goal_z=goal_z,
-        model={
-            "checkpoint_path": str(checkpoint),
-            "checkpoint_sha256": hashes.get("checkpoint_sha256"),
-            "actor_onnx_path": str(actor),
-            "actor_onnx_sha256": hashes.get("actor_sha256"),
-            "goal_context_path": str(goals),
-        },
+        model=(
+            {
+                "provider": "legged-lab-amp",
+                "actor_onnx_path": str(actor),
+                "actor_onnx_sha256": hashes.get("actor_sha256"),
+                "torchscript_path": str(torchscript),
+                "torchscript_sha256": hashes.get("torchscript_sha256"),
+                "environment_config_path": str(env_config),
+                "environment_config_sha256": hashes.get("environment_config_sha256"),
+                "latent_inspector": "excluded: provider has no B/F/D/QD/Q checkpoint interfaces",
+            }
+            if is_amp
+            else {
+                "checkpoint_path": str(checkpoint),
+                "checkpoint_sha256": hashes.get("checkpoint_sha256"),
+                "actor_onnx_path": str(actor),
+                "actor_onnx_sha256": hashes.get("actor_sha256"),
+                "goal_context_path": str(goals),
+            }
+        ),
         seed=int(manifest["config"]["seed"]),
         fallen_z_threshold_m=float(manifest["config"]["fallen_height_m"]),
         recovery_z_threshold_m=float(manifest["config"]["recovery_height_m"]),

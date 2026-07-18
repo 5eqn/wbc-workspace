@@ -18,7 +18,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from bfm_zero_trial_sources import Trial, load_fast_source, load_stage2_source
+from bfm_zero_trial_sources import (
+    FAST_STATE_FRAMES,
+    Trial,
+    aligned_fast_actions,
+    load_fast_source,
+    load_stage2_source,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -44,7 +50,9 @@ DEFAULT_ANGULAR_VELOCITY_MAX_RPS = 8.0
 DEFAULT_LINEAR_VELOCITY_UP_COS_MIN = -0.8
 DEFAULT_LINEAR_VELOCITY_UP_COS_MAX = 0.0
 DEFAULT_GOAL_KEY = "dance1_subject3_505"
-DEFAULT_NEW_MODEL_ROOT = Path.home() / "BFM-Zero-Data" / "new_model_for_training_code_inference"
+DEFAULT_NEW_MODEL_ROOT = (
+    Path.home() / "BFM-Zero-Data" / "new_model_for_training_code_inference"
+)
 DEFAULT_NEW_CHECKPOINT = DEFAULT_NEW_MODEL_ROOT / "checkpoint"
 DEFAULT_NEW_ACTOR = DEFAULT_NEW_MODEL_ROOT / "exported" / "FBcprAuxModel.onnx"
 DEFAULT_FALL_GOALS = [
@@ -103,7 +111,9 @@ def ensure_runtime_python() -> None:
     env["BFM_ZERO_EVAL_REEXEC"] = "1"
     env.setdefault("MUJOCO_GL", "egl")
     env.setdefault("OMP_NUM_THREADS", "1")
-    os.execve(str(target), [str(target), str(Path(__file__).resolve()), *sys.argv[1:]], env)
+    os.execve(
+        str(target), [str(target), str(Path(__file__).resolve()), *sys.argv[1:]], env
+    )
 
 
 def runtime() -> SimpleNamespace:
@@ -119,6 +129,7 @@ def runtime() -> SimpleNamespace:
     import numpy as np
     import torch
     import yaml
+
     try:
         import imageio.v2 as imageio
     except ModuleNotFoundError:
@@ -229,7 +240,15 @@ def read_log_text(path: Path) -> str:
 
 
 class ManagedProcess:
-    def __init__(self, cmd: list[str], cwd: Path, log_path: Path, *, env: dict[str, str] | None = None, use_pty: bool = False):
+    def __init__(
+        self,
+        cmd: list[str],
+        cwd: Path,
+        log_path: Path,
+        *,
+        env: dict[str, str] | None = None,
+        use_pty: bool = False,
+    ):
         self.cmd = cmd
         self.cwd = cwd
         self.log_path = log_path
@@ -295,7 +314,9 @@ class ManagedProcess:
                     return marker
             code = self.poll()
             if code is not None:
-                raise RuntimeError(f"process exited before marker {marker_list}: {code}")
+                raise RuntimeError(
+                    f"process exited before marker {marker_list}: {code}"
+                )
             time.sleep(0.1)
         raise TimeoutError(f"Timed out waiting for log marker {marker_list}")
 
@@ -346,14 +367,20 @@ def parse_goal_key(goal_key: str) -> tuple[str, int]:
 
 
 def wxyz_to_xyzw(rt: SimpleNamespace, quat_wxyz: Any) -> Any:
-    return rt.np.asarray([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=rt.np.float32)
+    return rt.np.asarray(
+        [quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=rt.np.float32
+    )
 
 
 def xyzw_to_wxyz(rt: SimpleNamespace, quat_xyzw: Any) -> Any:
-    return rt.np.asarray([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]], dtype=rt.np.float32)
+    return rt.np.asarray(
+        [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]], dtype=rt.np.float32
+    )
 
 
-def euler_xyz_to_wxyz(rt: SimpleNamespace, roll: float, pitch: float, yaw: float) -> Any:
+def euler_xyz_to_wxyz(
+    rt: SimpleNamespace, roll: float, pitch: float, yaw: float
+) -> Any:
     cr = math.cos(roll * 0.5)
     sr = math.sin(roll * 0.5)
     cp = math.cos(pitch * 0.5)
@@ -389,18 +416,26 @@ def compute_humanoid_observations_max_local(
     if root_height_obs:
         obs_dict["root_height"] = root_h
 
-    heading_rot_inv_expand = heading_rot_inv.unsqueeze(-2).repeat((1, body_pos.shape[1], 1))
-    flat_heading_rot_inv = heading_rot_inv_expand.reshape(-1, heading_rot_inv_expand.shape[-1])
+    heading_rot_inv_expand = heading_rot_inv.unsqueeze(-2).repeat(
+        (1, body_pos.shape[1], 1)
+    )
+    flat_heading_rot_inv = heading_rot_inv_expand.reshape(
+        -1, heading_rot_inv_expand.shape[-1]
+    )
 
     root_pos_expand = root_pos.unsqueeze(-2)
     local_body_pos = body_pos - root_pos_expand
     flat_local_body_pos = local_body_pos.reshape(-1, local_body_pos.shape[-1])
-    flat_local_body_pos = rt.quat_rotate(flat_heading_rot_inv, flat_local_body_pos, w_last=True)
+    flat_local_body_pos = rt.quat_rotate(
+        flat_heading_rot_inv, flat_local_body_pos, w_last=True
+    )
     local_body_pos = flat_local_body_pos.reshape(local_body_pos.shape[0], -1)
     local_body_pos = local_body_pos[..., 3:]
 
     flat_body_rot = body_rot.reshape(-1, body_rot.shape[-1])
-    flat_local_body_rot = rt.hv_quat_mul(flat_heading_rot_inv, flat_body_rot, w_last=True)
+    flat_local_body_rot = rt.hv_quat_mul(
+        flat_heading_rot_inv, flat_body_rot, w_last=True
+    )
     flat_local_body_rot_obs = rt.quat_to_tan_norm(flat_local_body_rot, w_last=True)
     local_body_rot_obs = flat_local_body_rot_obs.reshape(body_rot.shape[0], -1)
 
@@ -409,11 +444,15 @@ def compute_humanoid_observations_max_local(
         local_body_rot_obs[..., 0:6] = root_rot_obs
 
     flat_body_vel = body_vel.reshape(-1, body_vel.shape[-1])
-    flat_local_body_vel = rt.quat_rotate(flat_heading_rot_inv, flat_body_vel, w_last=True)
+    flat_local_body_vel = rt.quat_rotate(
+        flat_heading_rot_inv, flat_body_vel, w_last=True
+    )
     local_body_vel = flat_local_body_vel.reshape(body_vel.shape[0], -1)
 
     flat_body_ang_vel = body_ang_vel.reshape(-1, body_ang_vel.shape[-1])
-    flat_local_body_ang_vel = rt.quat_rotate(flat_heading_rot_inv, flat_body_ang_vel, w_last=True)
+    flat_local_body_ang_vel = rt.quat_rotate(
+        flat_heading_rot_inv, flat_body_ang_vel, w_last=True
+    )
     local_body_ang_vel = flat_local_body_ang_vel.reshape(body_ang_vel.shape[0], -1)
 
     obs_dict["local_body_pos"] = local_body_pos
@@ -423,7 +462,9 @@ def compute_humanoid_observations_max_local(
     return obs_dict
 
 
-def build_joint_mappings(rt: SimpleNamespace, model: Any, joint_names: list[str]) -> tuple[Any, Any, Any]:
+def build_joint_mappings(
+    rt: SimpleNamespace, model: Any, joint_names: list[str]
+) -> tuple[Any, Any, Any]:
     qpos_ids = []
     qvel_ids = []
     actuator_ids = []
@@ -434,7 +475,9 @@ def build_joint_mappings(rt: SimpleNamespace, model: Any, joint_names: list[str]
         qpos_ids.append(int(model.jnt_qposadr[joint_id]))
         qvel_ids.append(int(model.jnt_dofadr[joint_id]))
         actuator_name = joint_name.replace("_joint", "")
-        actuator_id = rt.mujoco.mj_name2id(model, rt.mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name)
+        actuator_id = rt.mujoco.mj_name2id(
+            model, rt.mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name
+        )
         if actuator_id < 0:
             raise KeyError(f"Actuator {actuator_name} not found in MuJoCo model")
         actuator_ids.append(int(actuator_id))
@@ -463,7 +506,9 @@ def build_body_ids(rt: SimpleNamespace, model: Any) -> tuple[list[int], int, int
     return body_ids, pelvis_body_id, extend_parent_body_id
 
 
-def resolve_joint_array(rt: SimpleNamespace, config_values: dict[str, Any], joint_names: list[str]) -> Any:
+def resolve_joint_array(
+    rt: SimpleNamespace, config_values: dict[str, Any], joint_names: list[str]
+) -> Any:
     joint_indices, _, values = rt.resolve_matching_names_values(
         config_values,
         joint_names,
@@ -471,11 +516,19 @@ def resolve_joint_array(rt: SimpleNamespace, config_values: dict[str, Any], join
         strict=False,
     )
     output = rt.np.zeros(len(joint_names), dtype=rt.np.float32)
-    output[rt.np.asarray(joint_indices, dtype=rt.np.int64)] = rt.np.asarray(values, dtype=rt.np.float32)
+    output[rt.np.asarray(joint_indices, dtype=rt.np.int64)] = rt.np.asarray(
+        values, dtype=rt.np.float32
+    )
     return output
 
 
-def extract_body_state(rt: SimpleNamespace, model: Any, data: Any, body_ids: list[int], extend_parent_body_id: int) -> tuple[Any, Any, Any, Any]:
+def extract_body_state(
+    rt: SimpleNamespace,
+    model: Any,
+    data: Any,
+    body_ids: list[int],
+    extend_parent_body_id: int,
+) -> tuple[Any, Any, Any, Any]:
     np = rt.np
     body_count = len(body_ids) + 1
     body_pos = np.zeros((body_count, 3), dtype=np.float32)
@@ -487,7 +540,9 @@ def extract_body_state(rt: SimpleNamespace, model: Any, data: Any, body_ids: lis
     for idx, body_id in enumerate(body_ids):
         body_pos[idx] = data.xpos[body_id]
         body_rot[idx] = wxyz_to_xyzw(rt, data.xquat[body_id])
-        rt.mujoco.mj_objectVelocity(model, data, rt.mujoco.mjtObj.mjOBJ_BODY, body_id, velocity, 0)
+        rt.mujoco.mj_objectVelocity(
+            model, data, rt.mujoco.mjtObj.mjOBJ_BODY, body_id, velocity, 0
+        )
         body_ang_vel[idx] = velocity[0:3]
         body_vel[idx] = velocity[3:6]
     parent_idx = len(body_ids)
@@ -495,20 +550,40 @@ def extract_body_state(rt: SimpleNamespace, model: Any, data: Any, body_ids: lis
     offset_world = parent_rot_matrix @ offset
     body_pos[parent_idx] = data.xpos[extend_parent_body_id] + offset_world
     body_rot[parent_idx] = wxyz_to_xyzw(rt, data.xquat[extend_parent_body_id])
-    rt.mujoco.mj_objectVelocity(model, data, rt.mujoco.mjtObj.mjOBJ_BODY, extend_parent_body_id, velocity, 0)
+    rt.mujoco.mj_objectVelocity(
+        model, data, rt.mujoco.mjtObj.mjOBJ_BODY, extend_parent_body_id, velocity, 0
+    )
     parent_ang_vel = velocity[0:3].astype(np.float32)
     parent_lin_vel = velocity[3:6].astype(np.float32)
     body_ang_vel[parent_idx] = parent_ang_vel
-    body_vel[parent_idx] = parent_lin_vel + np.cross(parent_ang_vel, offset_world.astype(np.float32))
+    body_vel[parent_idx] = parent_lin_vel + np.cross(
+        parent_ang_vel, offset_world.astype(np.float32)
+    )
     return body_pos, body_rot, body_vel, body_ang_vel
 
 
-def build_backward_obs(rt: SimpleNamespace, body_pos: Any, body_rot: Any, body_vel: Any, body_ang_vel: Any, joint_pos: Any, joint_vel: Any) -> dict[str, Any]:
+def build_backward_obs(
+    rt: SimpleNamespace,
+    body_pos: Any,
+    body_rot: Any,
+    body_vel: Any,
+    body_ang_vel: Any,
+    joint_pos: Any,
+    joint_vel: Any,
+) -> dict[str, Any]:
     torch = rt.torch
-    body_pos_t = torch.from_numpy(body_pos[None, ...]).to(device="cpu", dtype=torch.float32)
-    body_rot_t = torch.from_numpy(body_rot[None, ...]).to(device="cpu", dtype=torch.float32)
-    body_vel_t = torch.from_numpy(body_vel[None, ...]).to(device="cpu", dtype=torch.float32)
-    body_ang_vel_t = torch.from_numpy(body_ang_vel[None, ...]).to(device="cpu", dtype=torch.float32)
+    body_pos_t = torch.from_numpy(body_pos[None, ...]).to(
+        device="cpu", dtype=torch.float32
+    )
+    body_rot_t = torch.from_numpy(body_rot[None, ...]).to(
+        device="cpu", dtype=torch.float32
+    )
+    body_vel_t = torch.from_numpy(body_vel[None, ...]).to(
+        device="cpu", dtype=torch.float32
+    )
+    body_ang_vel_t = torch.from_numpy(body_ang_vel[None, ...]).to(
+        device="cpu", dtype=torch.float32
+    )
     max_local_self = compute_humanoid_observations_max_local(
         rt,
         body_pos_t,
@@ -521,7 +596,9 @@ def build_backward_obs(rt: SimpleNamespace, body_pos: Any, body_rot: Any, body_v
     privileged_state = torch.cat([value for value in max_local_self.values()], dim=-1)
     base_quat = body_rot_t[:, 0]
     gravity = torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32)
-    projected_gravity = rt.quat_rotate_inverse(base_quat, gravity.repeat(privileged_state.shape[0], 1), w_last=True)
+    projected_gravity = rt.quat_rotate_inverse(
+        base_quat, gravity.repeat(privileged_state.shape[0], 1), w_last=True
+    )
     state = torch.cat(
         [
             torch.from_numpy(joint_pos[None, ...]).to(dtype=torch.float32),
@@ -541,12 +618,16 @@ def cosine_similarity(rt: SimpleNamespace, a: Any, b: Any) -> float:
     return float(rt.np.clip(rt.np.dot(a, b) / denom, -1.0, 1.0))
 
 
-def speed_summary(rt: SimpleNamespace, model: Any, data: Any, pelvis_body_id: int, joint_qvel_ids: Any) -> dict[str, float]:
+def speed_summary(
+    rt: SimpleNamespace, model: Any, data: Any, pelvis_body_id: int, joint_qvel_ids: Any
+) -> dict[str, float]:
     rt.mujoco.mj_forward(model, data)
     root_vel = rt.np.asarray(data.cvel[pelvis_body_id, 3:6], dtype=rt.np.float32)
     root_ang_vel = rt.np.asarray(data.cvel[pelvis_body_id, 0:3], dtype=rt.np.float32)
     joint_vel = rt.np.asarray(data.qvel[joint_qvel_ids], dtype=rt.np.float32)
-    joint_vel_rms = float(rt.np.sqrt(rt.np.mean(joint_vel * joint_vel))) if joint_vel.size else 0.0
+    joint_vel_rms = (
+        float(rt.np.sqrt(rt.np.mean(joint_vel * joint_vel))) if joint_vel.size else 0.0
+    )
     return {
         "root_lin_speed_mps": float(rt.np.linalg.norm(root_vel)),
         "root_ang_speed_rps": float(rt.np.linalg.norm(root_ang_vel)),
@@ -577,7 +658,9 @@ def stability_sample(
     root_vel = rt.np.asarray(data.cvel[pelvis_body_id, 3:6], dtype=rt.np.float32)
     root_ang_vel = rt.np.asarray(data.cvel[pelvis_body_id, 0:3], dtype=rt.np.float32)
     joint_vel = rt.np.asarray(data.qvel[joint_qvel_ids], dtype=rt.np.float32)
-    joint_vel_rms = float(rt.np.sqrt(rt.np.mean(joint_vel * joint_vel))) if joint_vel.size else 0.0
+    joint_vel_rms = (
+        float(rt.np.sqrt(rt.np.mean(joint_vel * joint_vel))) if joint_vel.size else 0.0
+    )
     return {
         "root_pos": root_pos.copy(),
         "root_speed": float(rt.np.linalg.norm(root_vel)),
@@ -596,7 +679,9 @@ def history_is_stable(
 ) -> bool:
     if not history:
         return False
-    root_span = float(rt.np.linalg.norm(history[-1]["root_pos"] - history[0]["root_pos"]))
+    root_span = float(
+        rt.np.linalg.norm(history[-1]["root_pos"] - history[0]["root_pos"])
+    )
     return (
         max(sample["root_speed"] for sample in history) <= stable_root_speed_mps
         and max(sample["root_ang_speed"] for sample in history) <= stable_ang_speed_rps
@@ -605,7 +690,9 @@ def history_is_stable(
     )
 
 
-def contact_summary_for_current_state(rt: SimpleNamespace, model: Any, data: Any) -> dict[str, Any]:
+def contact_summary_for_current_state(
+    rt: SimpleNamespace, model: Any, data: Any
+) -> dict[str, Any]:
     self_pairs: set[tuple[str, str]] = set()
     floor_bodies: set[str] = set()
     self_contact_count = 0
@@ -624,7 +711,9 @@ def contact_summary_for_current_state(rt: SimpleNamespace, model: Any, data: Any
             continue
         self_contact_count += 1
         self_pairs.add(tuple(sorted((name1, name2))))
-    floor_contact_bodies = sorted(body for body in floor_bodies if body and body != "world")
+    floor_contact_bodies = sorted(
+        body for body in floor_bodies if body and body != "world"
+    )
     self_contact_pairs = [" <-> ".join(pair) for pair in sorted(self_pairs)]
     return {
         "has_floor_contact": bool(floor_contact_count > 0),
@@ -638,7 +727,9 @@ def contact_summary_for_current_state(rt: SimpleNamespace, model: Any, data: Any
     }
 
 
-def write_trajectory_npz(path: Path, time_s: Any, qpos: Any, qvel: Any, root_z: Any) -> None:
+def write_trajectory_npz(
+    path: Path, time_s: Any, qpos: Any, qvel: Any, root_z: Any
+) -> None:
     rt = runtime()
     path.parent.mkdir(parents=True, exist_ok=True)
     rt.np.savez_compressed(
@@ -661,10 +752,14 @@ def settle_passively(
     data.ctrl[:] = 0.0
     qpos_log = [data.qpos.copy()]
     qvel_log = [data.qvel.copy()]
-    root_z_log = [float(data.xpos[pelvis_body_id, 2])] if pelvis_body_id is not None else []
+    root_z_log = (
+        [float(data.xpos[pelvis_body_id, 2])] if pelvis_body_id is not None else []
+    )
     for _ in range(settle_steps):
         rt.mujoco.mj_step(model, data)
-        if not rt.np.all(rt.np.isfinite(data.qpos)) or not rt.np.all(rt.np.isfinite(data.qvel)):
+        if not rt.np.all(rt.np.isfinite(data.qpos)) or not rt.np.all(
+            rt.np.isfinite(data.qvel)
+        ):
             return False, None
         qpos_log.append(data.qpos.copy())
         qvel_log.append(data.qvel.copy())
@@ -706,7 +801,9 @@ def settle_until_stable(
     data.ctrl[:] = 0.0
     for _ in range(max_steps):
         rt.mujoco.mj_step(model, data)
-        if not rt.np.all(rt.np.isfinite(data.qpos)) or not rt.np.all(rt.np.isfinite(data.qvel)):
+        if not rt.np.all(rt.np.isfinite(data.qpos)) or not rt.np.all(
+            rt.np.isfinite(data.qvel)
+        ):
             return False, None, None
         qpos_log.append(data.qpos.copy())
         qvel_log.append(data.qvel.copy())
@@ -726,14 +823,22 @@ def settle_until_stable(
                 "qvel": rt.np.asarray(qvel_log, dtype=rt.np.float32),
                 "root_z": rt.np.asarray(root_z_log, dtype=rt.np.float32),
             }
-            return True, trajectory, speed_summary(rt, model, data, pelvis_body_id, joint_qvel_ids)
+            return (
+                True,
+                trajectory,
+                speed_summary(rt, model, data, pelvis_body_id, joint_qvel_ids),
+            )
     trajectory = {
         "time_s": rt.np.arange(len(qpos_log), dtype=rt.np.float32) * sim_dt,
         "qpos": rt.np.asarray(qpos_log, dtype=rt.np.float32),
         "qvel": rt.np.asarray(qvel_log, dtype=rt.np.float32),
         "root_z": rt.np.asarray(root_z_log, dtype=rt.np.float32),
     }
-    return False, trajectory, speed_summary(rt, model, data, pelvis_body_id, joint_qvel_ids)
+    return (
+        False,
+        trajectory,
+        speed_summary(rt, model, data, pelvis_body_id, joint_qvel_ids),
+    )
 
 
 def sample_fallen_state(
@@ -773,11 +878,15 @@ def sample_fallen_state(
             float(rng.uniform(-math.pi, math.pi)),
             float(rng.uniform(-math.pi, math.pi)),
         )
-        data.qpos[joint_qpos_ids] = rt.np.clip(rng.uniform(joint_lower, joint_upper), joint_lower, joint_upper)
+        data.qpos[joint_qpos_ids] = rt.np.clip(
+            rng.uniform(joint_lower, joint_upper), joint_lower, joint_upper
+        )
         data.qvel[:] = 0.0
         data.qvel[0:3] = rng.normal(0.0, 0.05, size=3)
         data.qvel[3:6] = rng.normal(0.0, 0.2, size=3)
-        data.qvel[joint_qvel_ids] = rng.normal(0.0, rt.np.maximum(0.1, 0.05 * joint_span), size=joint_qvel_ids.shape[0])
+        data.qvel[joint_qvel_ids] = rng.normal(
+            0.0, rt.np.maximum(0.1, 0.05 * joint_span), size=joint_qvel_ids.shape[0]
+        )
         rt.mujoco.mj_forward(model, data)
         raw_contact = contact_summary_for_current_state(rt, model, data)
         if raw_contact["has_floor_contact"]:
@@ -833,12 +942,16 @@ def motion_frame_to_state(
     pelvis_body_id: int,
     settle_steps: int,
 ) -> tuple[Any, Any, dict[str, Any], dict[str, Any] | None]:
-    motion_data = rt.joblib.load(BFM_ZERO_TRAIN_ROOT / "humanoidverse" / "data" / "lafan_29dof.pkl")
+    motion_data = rt.joblib.load(
+        BFM_ZERO_TRAIN_ROOT / "humanoidverse" / "data" / "lafan_29dof.pkl"
+    )
     if motion_key not in motion_data:
         raise KeyError(f"Motion {motion_key} missing from lafan_29dof.pkl")
     entry = motion_data[motion_key]
     if frame_idx < 0 or frame_idx >= int(entry["dof"].shape[0]):
-        raise IndexError(f"Frame {frame_idx} outside motion length {entry['dof'].shape[0]}")
+        raise IndexError(
+            f"Frame {frame_idx} outside motion length {entry['dof'].shape[0]}"
+        )
     rt.mujoco.mj_resetData(model, data)
     data.qpos[0:3] = entry["root_trans_offset"][frame_idx]
     data.qpos[3:7] = xyzw_to_wxyz(rt, entry["root_rot"][frame_idx])
@@ -846,12 +959,19 @@ def motion_frame_to_state(
     data.qvel[:] = 0.0
     if frame_idx > 0 and frame_idx + 1 < int(entry["dof"].shape[0]):
         dt = 1.0 / float(entry.get("fps", 50))
-        data.qvel[0:3] = (entry["root_trans_offset"][frame_idx + 1] - entry["root_trans_offset"][frame_idx - 1]) / (2.0 * dt)
+        data.qvel[0:3] = (
+            entry["root_trans_offset"][frame_idx + 1]
+            - entry["root_trans_offset"][frame_idx - 1]
+        ) / (2.0 * dt)
         if len(joint_qvel_ids) > 0:
-            data.qvel[joint_qvel_ids] = (entry["dof"][frame_idx + 1] - entry["dof"][frame_idx - 1]) / (2.0 * dt)
+            data.qvel[joint_qvel_ids] = (
+                entry["dof"][frame_idx + 1] - entry["dof"][frame_idx - 1]
+            ) / (2.0 * dt)
     rt.mujoco.mj_forward(model, data)
     raw_contact = contact_summary_for_current_state(rt, model, data)
-    _, settle_trajectory = settle_passively(rt, model, data, settle_steps, pelvis_body_id)
+    _, settle_trajectory = settle_passively(
+        rt, model, data, settle_steps, pelvis_body_id
+    )
     rt.mujoco.mj_forward(model, data)
     return data.qpos.copy(), data.qvel.copy(), raw_contact, settle_trajectory
 
@@ -881,11 +1001,15 @@ def load_target_body_positions(
     data.qpos[:] = qpos
     data.qvel[:] = 0.0
     rt.mujoco.mj_forward(model, data)
-    target_body_pos, _, _, _ = extract_body_state(rt, model, data, body_ids, extend_parent_body_id)
+    target_body_pos, _, _, _ = extract_body_state(
+        rt, model, data, body_ids, extend_parent_body_id
+    )
     return target_body_pos
 
 
-def build_renderer(rt: SimpleNamespace, model: Any, width: int, height: int, pelvis_body_id: int) -> tuple[Any, Any]:
+def build_renderer(
+    rt: SimpleNamespace, model: Any, width: int, height: int, pelvis_body_id: int
+) -> tuple[Any, Any]:
     model.vis.global_.offwidth = max(int(model.vis.global_.offwidth), int(width))
     model.vis.global_.offheight = max(int(model.vis.global_.offheight), int(height))
     renderer = rt.mujoco.Renderer(model, width=width, height=height)
@@ -899,7 +1023,15 @@ def build_renderer(rt: SimpleNamespace, model: Any, width: int, height: int, pel
     return renderer, camera
 
 
-def render_frame(rt: SimpleNamespace, renderer: Any, camera: Any, model: Any, data: Any, pelvis_body_id: int, qpos: Any) -> Any:
+def render_frame(
+    rt: SimpleNamespace,
+    renderer: Any,
+    camera: Any,
+    model: Any,
+    data: Any,
+    pelvis_body_id: int,
+    qpos: Any,
+) -> Any:
     data.qpos[:] = qpos
     data.qvel[:] = 0.0
     rt.mujoco.mj_forward(model, data)
@@ -909,7 +1041,14 @@ def render_frame(rt: SimpleNamespace, renderer: Any, camera: Any, model: Any, da
     return renderer.render().copy()
 
 
-def write_plot(rt: SimpleNamespace, curves: Any, time_s: Any, title: str, ylabel: str, output_path: Path) -> None:
+def write_plot(
+    rt: SimpleNamespace,
+    curves: Any,
+    time_s: Any,
+    title: str,
+    ylabel: str,
+    output_path: Path,
+) -> None:
     if rt.plt is None:
         raise ModuleNotFoundError("matplotlib is required for stage3 plot generation")
     fig, ax = rt.plt.subplots(figsize=(12, 6))
@@ -925,7 +1064,9 @@ def write_plot(rt: SimpleNamespace, curves: Any, time_s: Any, title: str, ylabel
     rt.plt.close(fig)
 
 
-def tile_video(rt: SimpleNamespace, frames: Any, fps: int, output_path: Path) -> tuple[int, int, int, int]:
+def tile_video(
+    rt: SimpleNamespace, frames: Any, fps: int, output_path: Path
+) -> tuple[int, int, int, int]:
     if rt.imageio is None:
         raise ModuleNotFoundError("imageio is required for video export")
     num_runs, frame_count, tile_height, tile_width, _ = frames.shape
@@ -933,14 +1074,18 @@ def tile_video(rt: SimpleNamespace, frames: Any, fps: int, output_path: Path) ->
     grid_rows = math.ceil(num_runs / grid_cols)
     output_width = grid_cols * tile_width
     output_height = grid_rows * tile_height
-    writer = rt.imageio.get_writer(output_path, fps=fps, codec="libx264", macro_block_size=None)
+    writer = rt.imageio.get_writer(
+        output_path, fps=fps, codec="libx264", macro_block_size=None
+    )
     for frame_idx in range(frame_count):
         canvas = rt.np.zeros((output_height, output_width, 3), dtype=rt.np.uint8)
         for run_idx in range(num_runs):
             row, col = divmod(run_idx, grid_cols)
             y0 = row * tile_height
             x0 = col * tile_width
-            canvas[y0 : y0 + tile_height, x0 : x0 + tile_width] = frames[run_idx, frame_idx]
+            canvas[y0 : y0 + tile_height, x0 : x0 + tile_width] = frames[
+                run_idx, frame_idx
+            ]
         writer.append_data(canvas)
     writer.close()
     return grid_rows, grid_cols, output_width, output_height
@@ -965,11 +1110,20 @@ def build_layout(run_id: str) -> EvalLayout:
     stage1_dir.mkdir(parents=True, exist_ok=True)
     stage2_dir.mkdir(parents=True, exist_ok=True)
     stage3_dir.mkdir(parents=True, exist_ok=True)
-    return EvalLayout(run_id, root_log_dir, root_artifact_dir, stage1_dir, stage2_dir, stage3_dir)
+    return EvalLayout(
+        run_id, root_log_dir, root_artifact_dir, stage1_dir, stage2_dir, stage3_dir
+    )
 
 
 def sim_runner_cmd(mode: str, extra_args: list[str]) -> list[str]:
-    return [sys.executable, str(Path(__file__).resolve()), "_sim_runner", "--mode", mode, *extra_args]
+    return [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "_sim_runner",
+        "--mode",
+        mode,
+        *extra_args,
+    ]
 
 
 def stage1_manifest_path(stage1_dir: Path) -> Path:
@@ -991,7 +1145,9 @@ def stage3_summary_path(stage3_dir: Path) -> Path:
 def write_stage_state_npz(path: Path, qpos: Any, qvel: Any, root_z: float) -> None:
     rt = runtime()
     path.parent.mkdir(parents=True, exist_ok=True)
-    rt.np.savez_compressed(path, qpos=qpos, qvel=qvel, root_z=rt.np.asarray(root_z, dtype=rt.np.float32))
+    rt.np.savez_compressed(
+        path, qpos=qpos, qvel=qvel, root_z=rt.np.asarray(root_z, dtype=rt.np.float32)
+    )
 
 
 def load_stage_state_npz(path: Path) -> tuple[Any, Any, float]:
@@ -1010,7 +1166,11 @@ def disturbance_config_from_args(
     scale_multiplier: float | None = None,
 ) -> dict[str, Any]:
     method = method_override or args.disturbance_method_override
-    scale = float(args.disturbance_scale_multiplier if scale_multiplier is None else scale_multiplier)
+    scale = float(
+        args.disturbance_scale_multiplier
+        if scale_multiplier is None
+        else scale_multiplier
+    )
     return {
         "ENABLED": True,
         "COMMAND_FILE": str(command_path),
@@ -1051,17 +1211,25 @@ def write_runtime_configs(
     auto_release_on_first_lowcmd: bool = False,
 ) -> tuple[Path, Path]:
     robot_config = load_yaml(BFM_ZERO_DEPLOY_ROOT / "config" / "robot" / "g1.yaml")
-    scene_config = load_yaml(BFM_ZERO_DEPLOY_ROOT / "config" / "scene" / "g1_29dof.yaml")
+    scene_config = load_yaml(
+        BFM_ZERO_DEPLOY_ROOT / "config" / "scene" / "g1_29dof.yaml"
+    )
     robot_scene = Path(str(scene_config["ROBOT_SCENE"]))
     if not robot_scene.is_absolute():
-        scene_config["ROBOT_SCENE"] = str((BFM_ZERO_DEPLOY_ROOT / robot_scene).resolve())
+        scene_config["ROBOT_SCENE"] = str(
+            (BFM_ZERO_DEPLOY_ROOT / robot_scene).resolve()
+        )
     robot_config["LOW_STATE_PORT"] = int(low_state_port)
     robot_config["LOW_CMD_PORT"] = int(low_cmd_port)
     robot_config["USE_JOYSTICK"] = False
     if disable_elastic_band:
         scene_config["ENABLE_ELASTIC_BAND"] = False
-    scene_config["ELASTIC_BAND_INITIAL_LENGTH_STEPS"] = int(elastic_band_initial_length_steps)
-    scene_config["ELASTIC_BAND_AUTO_RELEASE_ON_FIRST_LOWCMD"] = bool(auto_release_on_first_lowcmd)
+    scene_config["ELASTIC_BAND_INITIAL_LENGTH_STEPS"] = int(
+        elastic_band_initial_length_steps
+    )
+    scene_config["ELASTIC_BAND_AUTO_RELEASE_ON_FIRST_LOWCMD"] = bool(
+        auto_release_on_first_lowcmd
+    )
     if disturbance_config is not None:
         scene_config["DISTURBANCE_CONFIG"] = disturbance_config
     robot_config_path = run_dir / "robot_runtime.yaml"
@@ -1071,7 +1239,9 @@ def write_runtime_configs(
     return robot_config_path, scene_config_path
 
 
-def write_keyboard_event_request(command_path: Path, request_id: int, key: str = "f") -> None:
+def write_keyboard_event_request(
+    command_path: Path, request_id: int, key: str = "f"
+) -> None:
     write_json(
         command_path,
         {
@@ -1084,7 +1254,9 @@ def write_keyboard_event_request(command_path: Path, request_id: int, key: str =
     )
 
 
-def wait_for_status_value(status_path: Path, key: str, expected: Any, timeout_s: float) -> dict[str, Any]:
+def wait_for_status_value(
+    status_path: Path, key: str, expected: Any, timeout_s: float
+) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_s
     last_payload: dict[str, Any] = {}
     while time.monotonic() < deadline:
@@ -1096,7 +1268,9 @@ def wait_for_status_value(status_path: Path, key: str, expected: Any, timeout_s:
             if last_payload.get(key) == expected:
                 return last_payload
         time.sleep(0.1)
-    raise TimeoutError(f"Timed out waiting for status {key}={expected!r}: {status_path}")
+    raise TimeoutError(
+        f"Timed out waiting for status {key}={expected!r}: {status_path}"
+    )
 
 
 def sha256_file(path: Path) -> str:
@@ -1107,7 +1281,9 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def prepare_model_context(args: argparse.Namespace, layout: EvalLayout) -> dict[str, Any]:
+def prepare_model_context(
+    args: argparse.Namespace, layout: EvalLayout
+) -> dict[str, Any]:
     """Encode the requested goal with the rollout checkpoint and pin all model inputs."""
     rt = runtime()
     checkpoint = Path(args.model_checkpoint).expanduser().resolve()
@@ -1127,13 +1303,22 @@ def prepare_model_context(args: argparse.Namespace, layout: EvalLayout) -> dict[
     body_ids, pelvis_body_id, extend_parent_body_id = build_body_ids(rt, model)
     motion_key, frame_idx = parse_goal_key(args.goal_key)
     qpos, qvel, _, _ = motion_frame_to_state(
-        rt, model, data, motion_key, frame_idx, joint_qpos_ids, joint_qvel_ids, pelvis_body_id, 0
+        rt,
+        model,
+        data,
+        motion_key,
+        frame_idx,
+        joint_qpos_ids,
+        joint_qvel_ids,
+        pelvis_body_id,
+        0,
     )
     data.qpos[:] = qpos
     data.qvel[:] = qvel
     rt.mujoco.mj_forward(model, data)
     observation = build_backward_obs(
-        rt, *extract_body_state(rt, model, data, body_ids, extend_parent_body_id),
+        rt,
+        *extract_body_state(rt, model, data, body_ids, extend_parent_body_id),
         data.qpos[joint_qpos_ids].astype(rt.np.float32),
         data.qvel[joint_qvel_ids].astype(rt.np.float32),
     )
@@ -1142,7 +1327,12 @@ def prepare_model_context(args: argparse.Namespace, layout: EvalLayout) -> dict[
     latent_model.eval()
     observation = {key: value.to(device) for key, value in observation.items()}
     with rt.torch.inference_mode():
-        goal_z = latent_model.project_z(latent_model.backward_map(observation)).detach().cpu().numpy()
+        goal_z = (
+            latent_model.project_z(latent_model.backward_map(observation))
+            .detach()
+            .cpu()
+            .numpy()
+        )
     if goal_z.shape != (1, 256) or not rt.np.isfinite(goal_z).all():
         raise ValueError(f"Invalid goal latent: shape={goal_z.shape}")
     goal_norm = float(rt.np.linalg.norm(goal_z[0]))
@@ -1154,7 +1344,14 @@ def prepare_model_context(args: argparse.Namespace, layout: EvalLayout) -> dict[
     goal_context = context_dir / "goal_reaching.pkl"
     rt.joblib.dump({args.goal_key: goal_z.astype(rt.np.float32)}, goal_context)
     task_config = context_dir / "goal.yaml"
-    write_yaml(task_config, {"type": "goal", "ctx_path": str(goal_context.resolve()), "selected_goals": [args.goal_key]})
+    write_yaml(
+        task_config,
+        {
+            "type": "goal",
+            "ctx_path": str(goal_context.resolve()),
+            "selected_goals": [args.goal_key],
+        },
+    )
     metadata = {
         "checkpoint_path": str(checkpoint),
         "checkpoint_weights_path": str(weights),
@@ -1174,14 +1371,23 @@ def prepare_model_context(args: argparse.Namespace, layout: EvalLayout) -> dict[
 
 
 def selected_goal_order(task_config: str | Path | None = None) -> list[str]:
-    config = load_yaml(Path(task_config) if task_config else BFM_ZERO_DEPLOY_ROOT / "config" / "exp" / "goal" / "goal.yaml")
+    config = load_yaml(
+        Path(task_config)
+        if task_config
+        else BFM_ZERO_DEPLOY_ROOT / "config" / "exp" / "goal" / "goal.yaml"
+    )
     goals = config.get("selected_goals")
     if not isinstance(goals, list) or not goals:
         raise ValueError("config/exp/goal/goal.yaml has no selected_goals list")
     return [str(goal) for goal in goals]
 
 
-def advance_policy_to_goal(policy: ManagedProcess, goal_key: str, timeout_s: float, task_config: str | Path | None = None) -> int:
+def advance_policy_to_goal(
+    policy: ManagedProcess,
+    goal_key: str,
+    timeout_s: float,
+    task_config: str | Path | None = None,
+) -> int:
     order = selected_goal_order(task_config)
     if goal_key not in order:
         raise KeyError(f"{goal_key} missing from config/exp/goal/goal.yaml")
@@ -1193,7 +1399,9 @@ def advance_policy_to_goal(policy: ManagedProcess, goal_key: str, timeout_s: flo
     return target_index
 
 
-def launch_deployer(run_dir: Path, robot_config_path: Path, timeout_s: float, args: argparse.Namespace) -> ManagedProcess:
+def launch_deployer(
+    run_dir: Path, robot_config_path: Path, timeout_s: float, args: argparse.Namespace
+) -> ManagedProcess:
     cmd = [
         sys.executable,
         "rl_policy/bfm_zero.py",
@@ -1215,7 +1423,13 @@ def launch_deployer(run_dir: Path, robot_config_path: Path, timeout_s: float, ar
     if existing_pythonpath:
         pythonpath_entries.append(existing_pythonpath)
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
-    proc = ManagedProcess(cmd, BFM_ZERO_DEPLOY_ROOT, run_dir / "deployer_stdout.log", env=env, use_pty=True)
+    proc = ManagedProcess(
+        cmd,
+        BFM_ZERO_DEPLOY_ROOT,
+        run_dir / "deployer_stdout.log",
+        env=env,
+        use_pty=True,
+    )
     proc.start()
     proc.wait_for_marker(["Using keyboard", "task_type=goal"], timeout_s)
     return proc
@@ -1240,7 +1454,9 @@ def launch_sim_capture(
     )
     env = os.environ.copy()
     env.setdefault("MUJOCO_GL", "egl")
-    proc = ManagedProcess(cmd, REPO_ROOT, run_dir / "simulator_stdout.log", env=env, use_pty=False)
+    proc = ManagedProcess(
+        cmd, REPO_ROOT, run_dir / "simulator_stdout.log", env=env, use_pty=False
+    )
     proc.start()
     return proc
 
@@ -1270,7 +1486,9 @@ def synthetic_source_state_from_trajectory(
     }
 
 
-def run_stage2_replay(args: argparse.Namespace, manifest: dict[str, Any], layout: EvalLayout) -> dict[str, Any]:
+def run_stage2_replay(
+    args: argparse.Namespace, manifest: dict[str, Any], layout: EvalLayout
+) -> dict[str, Any]:
     stage2_dir = layout.stage2_dir
     stage2_runs_dir = stage2_dir / "runs"
     stage2_runs_dir.mkdir(parents=True, exist_ok=True)
@@ -1288,8 +1506,13 @@ def run_stage2_replay(args: argparse.Namespace, manifest: dict[str, Any], layout
         existing_summary_path = run_dir / "summary.json"
         if existing_summary_path.is_file():
             existing = load_json(existing_summary_path)
-            required_paths = [existing.get("trajectory_path"), existing.get("telemetry_path")]
-            if all(path and (REPO_ROOT / str(path)).is_file() for path in required_paths):
+            required_paths = [
+                existing.get("trajectory_path"),
+                existing.get("telemetry_path"),
+            ]
+            if all(
+                path and (REPO_ROOT / str(path)).is_file() for path in required_paths
+            ):
                 run_summaries.append(existing)
                 success_count += int(bool(existing["success"]))
                 continue
@@ -1304,7 +1527,9 @@ def run_stage2_replay(args: argparse.Namespace, manifest: dict[str, Any], layout
             done_file = attempt_dir / "eval_done.json"
             trajectory_path = attempt_dir / "trajectory.npz"
             attempt_summary_path = attempt_dir / "summary.json"
-            attempt_slot = run_idx * max(int(args.max_attempts_per_run), 1) + attempt_idx
+            attempt_slot = (
+                run_idx * max(int(args.max_attempts_per_run), 1) + attempt_idx
+            )
             low_state_port = args.port_base + attempt_slot * 2
             low_cmd_port = args.port_base + attempt_slot * 2 + 1
             robot_config_path, scene_config_path = write_runtime_configs(
@@ -1347,14 +1572,25 @@ def run_stage2_replay(args: argparse.Namespace, manifest: dict[str, Any], layout
             deployer: ManagedProcess | None = None
             try:
                 wait_for_path(ready_file, 10.0, "simulator ready file")
-                deployer = launch_deployer(attempt_dir, robot_config_path, args.policy_ready_timeout_s, args)
+                deployer = launch_deployer(
+                    attempt_dir, robot_config_path, args.policy_ready_timeout_s, args
+                )
                 goal_index = advance_policy_to_goal(
-                    deployer, args.goal_key, args.policy_ready_timeout_s, args.runtime_task_config
+                    deployer,
+                    args.goal_key,
+                    args.policy_ready_timeout_s,
+                    args.runtime_task_config,
                 )
                 touch(start_flag)
                 deployer.send("]")
-                deployer.wait_for_marker(f"Switch to goal={args.goal_key}", args.policy_ready_timeout_s)
-                wait_for_path(done_file, args.horizon_s + 20.0, f"stage2 done file for run {run_idx}")
+                deployer.wait_for_marker(
+                    f"Switch to goal={args.goal_key}", args.policy_ready_timeout_s
+                )
+                wait_for_path(
+                    done_file,
+                    args.horizon_s + 20.0,
+                    f"stage2 done file for run {run_idx}",
+                )
                 run_summary = load_json(attempt_summary_path)
             except TimeoutError as exc:
                 error_path = attempt_dir / "orchestrator_error.json"
@@ -1408,7 +1644,10 @@ def run_stage2_replay(args: argparse.Namespace, manifest: dict[str, Any], layout
         "num_runs": len(run_summaries),
         "success_count": success_count,
         "success_rate": float(success_count / len(run_summaries)),
-        "run_summaries": [repo_rel(stage2_runs_dir / f"run_{idx:03d}" / "summary.json") for idx in range(len(run_summaries))],
+        "run_summaries": [
+            repo_rel(stage2_runs_dir / f"run_{idx:03d}" / "summary.json")
+            for idx in range(len(run_summaries))
+        ],
         "model": dict(args.model_metadata),
     }
 
@@ -1485,14 +1724,29 @@ def run_induced_attempt(
     deployer: ManagedProcess | None = None
     try:
         wait_for_path(ready_file, 10.0, "simulator ready file")
-        deployer = launch_deployer(attempt_dir, robot_config_path, args.policy_ready_timeout_s, args)
-        goal_index = advance_policy_to_goal(deployer, args.goal_key, args.policy_ready_timeout_s, args.runtime_task_config)
+        deployer = launch_deployer(
+            attempt_dir, robot_config_path, args.policy_ready_timeout_s, args
+        )
+        goal_index = advance_policy_to_goal(
+            deployer,
+            args.goal_key,
+            args.policy_ready_timeout_s,
+            args.runtime_task_config,
+        )
         deployer.send("]")
-        deployer.wait_for_marker(f"Switch to goal={args.goal_key}", args.policy_ready_timeout_s)
+        deployer.wait_for_marker(
+            f"Switch to goal={args.goal_key}", args.policy_ready_timeout_s
+        )
         touch(start_flag)
-        wait_for_status_value(status_path, "ready_for_disturbance", True, args.static_ready_timeout_s)
+        wait_for_status_value(
+            status_path, "ready_for_disturbance", True, args.static_ready_timeout_s
+        )
         write_keyboard_event_request(command_path, 1, "f")
-        wait_for_path(done_file, args.horizon_s + args.static_ready_timeout_s + 20.0, f"stage2 done file for run {run_idx} attempt {attempt_idx}")
+        wait_for_path(
+            done_file,
+            args.horizon_s + args.static_ready_timeout_s + 20.0,
+            f"stage2 done file for run {run_idx} attempt {attempt_idx}",
+        )
     finally:
         if deployer is not None:
             deployer.terminate()
@@ -1542,11 +1796,18 @@ def run_stage2_induced(
         existing_summary_path = run_dir / "summary.json"
         if existing_summary_path.is_file():
             existing = load_json(existing_summary_path)
-            required_paths = [existing.get("trajectory_path"), existing.get("telemetry_path")]
-            if all(path and (REPO_ROOT / str(path)).is_file() for path in required_paths):
+            required_paths = [
+                existing.get("trajectory_path"),
+                existing.get("telemetry_path"),
+            ]
+            if all(
+                path and (REPO_ROOT / str(path)).is_file() for path in required_paths
+            ):
                 run_summaries.append(existing)
                 success_count += int(bool(existing["success"]))
-                perturbation_success_count += int(bool(existing.get("perturbation_success")))
+                perturbation_success_count += int(
+                    bool(existing.get("perturbation_success"))
+                )
                 continue
         accepted_summary: dict[str, Any] | None = None
         attempt_summary_paths: list[str] = []
@@ -1563,7 +1824,12 @@ def run_stage2_induced(
                 )
                 attempt_summary_paths.append(str(attempt_summary["summary_path"]))
             except Exception as exc:
-                error_path = run_dir / "attempts" / f"attempt_{attempt_idx:03d}" / "orchestrator_error.json"
+                error_path = (
+                    run_dir
+                    / "attempts"
+                    / f"attempt_{attempt_idx:03d}"
+                    / "orchestrator_error.json"
+                )
                 write_json(
                     error_path,
                     {
@@ -1597,7 +1863,9 @@ def run_stage2_induced(
         trajectory_rel = accepted_summary.get("trajectory_path")
         trajectory_path = REPO_ROOT / str(trajectory_rel) if trajectory_rel else None
         if trajectory_path is not None and trajectory_path.exists():
-            source_state = synthetic_source_state_from_trajectory(run_dir, trajectory_path, run_idx, args.goal_key)
+            source_state = synthetic_source_state_from_trajectory(
+                run_dir, trajectory_path, run_idx, args.goal_key
+            )
         else:
             source_state = {
                 "state_id": f"induced_state_{run_idx:03d}",
@@ -1634,7 +1902,10 @@ def run_stage2_induced(
         "success_count": success_count,
         "success_rate": float(success_count / len(run_summaries)),
         "perturbation_success_count": perturbation_success_count,
-        "run_summaries": [repo_rel(stage2_runs_dir / f"run_{idx:03d}" / "summary.json") for idx in range(len(run_summaries))],
+        "run_summaries": [
+            repo_rel(stage2_runs_dir / f"run_{idx:03d}" / "summary.json")
+            for idx in range(len(run_summaries))
+        ],
         "model": dict(args.model_metadata),
     }
     if method_override is not None:
@@ -1680,7 +1951,14 @@ def try_direct_goal_state(
     root_z = float(data.xpos[pelvis_body_id, 2])
     if root_z >= fallen_z:
         return None
-    return qpos, qvel, root_z, "lafan_29dof frame extraction + passive settle", raw_contact, settle_trajectory
+    return (
+        qpos,
+        qvel,
+        root_z,
+        "lafan_29dof frame extraction + passive settle",
+        raw_contact,
+        settle_trajectory,
+    )
 
 
 def stage1(args: argparse.Namespace) -> int:
@@ -1692,15 +1970,25 @@ def stage1(args: argparse.Namespace) -> int:
     states_dir.mkdir(parents=True, exist_ok=True)
     settle_logs_dir.mkdir(parents=True, exist_ok=True)
 
-    model = rt.mujoco.MjModel.from_xml_path(str(BFM_ZERO_DEPLOY_ROOT / "data" / "robots" / "g1" / "scene_29dof_freebase.xml"))
+    model = rt.mujoco.MjModel.from_xml_path(
+        str(
+            BFM_ZERO_DEPLOY_ROOT / "data" / "robots" / "g1" / "scene_29dof_freebase.xml"
+        )
+    )
     data = rt.mujoco.MjData(model)
-    policy_config = load_yaml(BFM_ZERO_DEPLOY_ROOT / "config" / "policy" / "motivo_newG1.yaml")
+    policy_config = load_yaml(
+        BFM_ZERO_DEPLOY_ROOT / "config" / "policy" / "motivo_newG1.yaml"
+    )
     robot_config = load_yaml(BFM_ZERO_DEPLOY_ROOT / "config" / "robot" / "g1.yaml")
     joint_names = [str(name) for name in policy_config["isaac_joint_names"]]
     joint_qpos_ids, joint_qvel_ids, _ = build_joint_mappings(rt, model, joint_names)
     _, pelvis_body_id, _ = build_body_ids(rt, model)
-    joint_lower = resolve_joint_array(rt, robot_config["joint_pos_lower_limit"], joint_names)
-    joint_upper = resolve_joint_array(rt, robot_config["joint_pos_upper_limit"], joint_names)
+    joint_lower = resolve_joint_array(
+        rt, robot_config["joint_pos_lower_limit"], joint_names
+    )
+    joint_upper = resolve_joint_array(
+        rt, robot_config["joint_pos_upper_limit"], joint_names
+    )
     rng = rt.np.random.default_rng(args.seed)
 
     direct_extraction: dict[str, dict[str, Any]] = {}
@@ -1738,7 +2026,9 @@ def stage1(args: argparse.Namespace) -> int:
         state_id = f"state_{len(manifest_states):03d}"
         state_path = states_dir / f"{state_id}.npz"
         settle_log_path = settle_logs_dir / f"{state_id}.npz"
-        write_stage_state_npz(state_path, sample["qpos"], sample["qvel"], sample["root_z_m"])
+        write_stage_state_npz(
+            state_path, sample["qpos"], sample["qvel"], sample["root_z_m"]
+        )
         write_trajectory_npz(
             settle_log_path,
             sample["settle_trajectory"]["time_s"],
@@ -1785,7 +2075,9 @@ def stage1(args: argparse.Namespace) -> int:
             args.settle_steps,
         )
         if direct is None:
-            raise RuntimeError(f"Goal-derived state for {goal_key} could not be reproduced by direct frame extraction")
+            raise RuntimeError(
+                f"Goal-derived state for {goal_key} could not be reproduced by direct frame extraction"
+            )
         qpos, qvel, root_z, reason, raw_contact, settle_trajectory = direct
         direct_extraction[goal_key] = {"supported": True, "reason": reason}
         trajectory_path = settle_logs_dir / f"goal_{goal_offset:02d}_{goal_key}.npz"
@@ -1798,7 +2090,9 @@ def stage1(args: argparse.Namespace) -> int:
                 settle_trajectory["root_z"],
             )
         if root_z >= args.fallen_z:
-            raise RuntimeError(f"Goal-derived state for {goal_key} has root_z={root_z:.4f} >= fallen threshold {args.fallen_z:.4f}")
+            raise RuntimeError(
+                f"Goal-derived state for {goal_key} has root_z={root_z:.4f} >= fallen threshold {args.fallen_z:.4f}"
+            )
         data.qpos[:] = qpos
         data.qvel[:] = qvel
         settled_speed = speed_summary(rt, model, data, pelvis_body_id, joint_qvel_ids)
@@ -1902,7 +2196,9 @@ def stage2(args: argparse.Namespace) -> int:
         summary = run_stage2_induced(args, layout)
     else:
         if not args.stage1_manifest:
-            raise ValueError("--stage1-manifest is required unless --induce-fall-in-simulator is enabled")
+            raise ValueError(
+                "--stage1-manifest is required unless --induce-fall-in-simulator is enabled"
+            )
         manifest = load_json(Path(args.stage1_manifest))
         layout = build_layout(args.run_id or str(manifest["run_id"]))
         prepare_model_context(args, layout)
@@ -1911,11 +2207,18 @@ def stage2(args: argparse.Namespace) -> int:
     summary_path = stage2_summary_path(layout.stage2_dir)
     write_json(summary_path, summary)
 
-    run_summaries = [load_json(REPO_ROOT / str(path)) for path in summary["run_summaries"]]
+    run_summaries = [
+        load_json(REPO_ROOT / str(path)) for path in summary["run_summaries"]
+    ]
     if len(run_summaries) == 100 and int(summary["success_count"]) == 0:
         investigation_path = layout.stage2_dir / "zero_success_investigation.json"
-        max_final_window = max(float(row.get("final_window_mean_root_z_m", float("nan"))) for row in run_summaries)
-        max_any_height = max(float(row.get("max_root_z_m", float("nan"))) for row in run_summaries)
+        max_final_window = max(
+            float(row.get("final_window_mean_root_z_m", float("nan")))
+            for row in run_summaries
+        )
+        max_any_height = max(
+            float(row.get("max_root_z_m", float("nan"))) for row in run_summaries
+        )
         write_json(
             investigation_path,
             {
@@ -1967,15 +2270,25 @@ def tune_disturbance(args: argparse.Namespace) -> int:
                 )
                 case_summary_path = stage2_summary_path(case_layout.stage2_dir)
                 write_json(case_summary_path, case_summary)
-                perturbation_success_rate = float(case_summary["perturbation_success_count"] / max(int(case_summary["num_runs"]), 1))
+                perturbation_success_rate = float(
+                    case_summary["perturbation_success_count"]
+                    / max(int(case_summary["num_runs"]), 1)
+                )
                 case_rows.append(
                     {
                         "method": method,
                         "scale_multiplier": scale_multiplier,
                         "num_runs": int(case_summary["num_runs"]),
-                        "perturbation_success_count": int(case_summary["perturbation_success_count"]),
+                        "perturbation_success_count": int(
+                            case_summary["perturbation_success_count"]
+                        ),
                         "perturbation_success_rate": perturbation_success_rate,
-                        "passes_0p1_gate": None if scale_multiplier != 0.1 else bool(perturbation_success_rate < args.tuning_gate_max_success_rate),
+                        "passes_0p1_gate": None
+                        if scale_multiplier != 0.1
+                        else bool(
+                            perturbation_success_rate
+                            < args.tuning_gate_max_success_rate
+                        ),
                         "stage2_summary": repo_rel(case_summary_path),
                     }
                 )
@@ -1995,7 +2308,137 @@ def tune_disturbance(args: argparse.Namespace) -> int:
             "cases": case_rows,
         },
     )
-    print(json.dumps({"tuning_summary": repo_rel(summary_path), "cases": case_rows}, indent=2))
+    print(
+        json.dumps(
+            {"tuning_summary": repo_rel(summary_path), "cases": case_rows}, indent=2
+        )
+    )
+    return 0
+
+
+def _stage3_amp(
+    args: argparse.Namespace, rt: Any, source: Any, stage3_dir: Path
+) -> int:
+    trials = list(source.trials)
+    num_runs = len(trials)
+    time_s = rt.np.arange(FAST_STATE_FRAMES, dtype=rt.np.float32) / 50.0
+    pelvis_height = rt.np.stack([trial.qpos[:, 2] for trial in trials]).astype(
+        rt.np.float32
+    )
+    quaternion = rt.np.stack([trial.qpos[:, 3:7] for trial in trials]).astype(
+        rt.np.float32
+    )
+    quaternion_norm = rt.np.linalg.norm(quaternion, axis=-1)
+    world_up_z = 1.0 - 2.0 * (quaternion[..., 1] ** 2 + quaternion[..., 2] ** 2)
+    action_norm = rt.np.stack(
+        [rt.np.linalg.norm(aligned_fast_actions(trial), axis=-1) for trial in trials]
+    ).astype(rt.np.float32)
+    success = rt.np.asarray([trial.success for trial in trials], dtype=bool)
+    metrics_path = stage3_dir / "metrics.npz"
+    rt.np.savez_compressed(
+        metrics_path,
+        time_s=time_s,
+        pelvis_height=pelvis_height,
+        world_up_z=world_up_z,
+        action_norm=action_norm,
+        success=success,
+    )
+    title = f"Legged Lab AMP induced-fall recovery (N={num_runs}, success={success.mean():.1%})"
+    height_plot = stage3_dir / "pelvis_height_lines.png"
+    up_plot = stage3_dir / "world_up_z_lines.png"
+    action_plot = stage3_dir / "action_norm_lines.png"
+    write_plot(rt, pelvis_height, time_s, title, "Pelvis Height (m)", height_plot)
+    write_plot(rt, world_up_z, time_s, title, "World-Up Z", up_plot)
+    write_plot(rt, action_norm, time_s, title, "Raw Action L2 Norm", action_plot)
+
+    model = rt.mujoco.MjModel.from_xml_path(
+        str(
+            BFM_ZERO_DEPLOY_ROOT / "data" / "robots" / "g1" / "scene_29dof_freebase.xml"
+        )
+    )
+    data = rt.mujoco.MjData(model)
+    pelvis_body_id = rt.mujoco.mj_name2id(model, rt.mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+    tiled_video = stage3_dir / "tiled_runs.mp4"
+    grid_rows, grid_cols, video_width, video_height = render_tiled_video_from_trials(
+        rt,
+        model,
+        data,
+        pelvis_body_id,
+        trials,
+        args.video_fps,
+        args.render_width,
+        args.render_height,
+        tiled_video,
+    )
+    selected_rounds = sorted(
+        {int(row["round_index"]) for row in source.metadata["selected_rows"]}
+    )
+    summary_path = stage3_summary_path(stage3_dir)
+    payload = {
+        "run_id": source.source_id,
+        "created_at": now_iso(),
+        "stage": "stage3",
+        "source_kind": source.source_kind,
+        "source_path": repo_rel(source.source_path),
+        "selected_attempt_ids": [trial.attempt_id for trial in trials],
+        "selected_rows": source.metadata["selected_rows"],
+        "model": source.model,
+        "num_runs": num_runs,
+        "seed": source.seed,
+        "fallen_z_threshold_m": source.fallen_z_threshold_m,
+        "recovery_z_threshold_m": source.recovery_z_threshold_m,
+        "horizon_s": source.horizon_s,
+        "success_count": int(success.sum()),
+        "success_rate": float(success.mean()),
+        "video_grid_rows": grid_rows,
+        "video_grid_cols": grid_cols,
+        "video_width": video_width,
+        "video_height": video_height,
+        "video_fps": args.video_fps,
+        "video_frames": 201,
+        "latent_inspector": "excluded: AMP exposes no B/F/D/QD/Q latent diagnostics",
+        "sanity": {
+            "finite": bool(
+                rt.np.isfinite(pelvis_height).all()
+                and rt.np.isfinite(world_up_z).all()
+                and rt.np.isfinite(action_norm).all()
+            ),
+            "frame0_quaternion_normalized": bool(
+                rt.np.all(rt.np.abs(quaternion_norm[:, 0] - 1) < 1e-4)
+            ),
+            "frame0_world_up_z_positive": bool(rt.np.all(world_up_z[:, 0] > 0)),
+            "deterministic_first_100": [trial.attempt_id for trial in trials]
+            == sorted(trial.attempt_id for trial in trials),
+            "full_grid_1920x1080": bool(
+                num_runs == 100 and video_width == 1920 and video_height == 1080
+            ),
+        },
+        "source_hashes": {
+            "manifest_sha256": sha256_file(Path(source.metadata["manifest_path"])),
+            "summary_sha256": sha256_file(Path(source.metadata["summary_path"])),
+            "round_sha256": {
+                f"round_{index:03d}.h5": sha256_file(
+                    source.source_path / f"round_{index:03d}.h5"
+                )
+                for index in selected_rounds
+            },
+        },
+        "artifacts": {
+            "metrics_npz": repo_rel(metrics_path),
+            "summary_json": repo_rel(summary_path),
+            "pelvis_height_plot": repo_rel(height_plot),
+            "world_up_z_plot": repo_rel(up_plot),
+            "action_norm_plot": repo_rel(action_plot),
+            "tiled_video": repo_rel(tiled_video),
+        },
+    }
+    write_json(summary_path, payload)
+    print(
+        json.dumps(
+            {"stage3_summary": repo_rel(summary_path), "video": repo_rel(tiled_video)},
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -2005,11 +2448,19 @@ def stage3(args: argparse.Namespace) -> int:
         raise ValueError("exactly one of --stage2-dir or --fast-run-dir is required")
     if args.fast_run_dir:
         source = load_fast_source(Path(args.fast_run_dir), REPO_ROOT)
-        stage3_dir = REPO_ROOT / "artifacts" / "bfm-zero-fast-induced" / source.source_id / "stage3"
+        stage3_dir = (
+            REPO_ROOT
+            / "artifacts"
+            / "bfm-zero-fast-induced"
+            / source.source_id
+            / "stage3"
+        )
     else:
         source = load_stage2_source(Path(args.stage2_dir), REPO_ROOT)
         stage3_dir = build_layout(source.source_id).stage3_dir
     stage3_dir.mkdir(parents=True, exist_ok=True)
+    if source.source_kind == "fast_replay_v3_amp":
+        return _stage3_amp(args, rt, source, stage3_dir)
     run_id = source.source_id
     summary = source.metadata["summary"]
     layout = build_layout(run_id)
@@ -2022,25 +2473,42 @@ def stage3(args: argparse.Namespace) -> int:
             stage3_dir.parent / "stage2",
             stage3_dir,
         )
-    stage1_manifest_rel = summary.get("stage1_manifest") if source.source_kind == "stage2" else None
-    stage1_manifest = load_json(REPO_ROOT / str(stage1_manifest_rel)) if stage1_manifest_rel else None
+    stage1_manifest_rel = (
+        summary.get("stage1_manifest") if source.source_kind == "stage2" else None
+    )
+    stage1_manifest = (
+        load_json(REPO_ROOT / str(stage1_manifest_rel)) if stage1_manifest_rel else None
+    )
     trials = list(source.trials)
     run_summaries = [dict(trial.metadata.get("run_summary") or {}) for trial in trials]
 
-    model = rt.mujoco.MjModel.from_xml_path(str(BFM_ZERO_DEPLOY_ROOT / "data" / "robots" / "g1" / "scene_29dof_freebase.xml"))
+    model = rt.mujoco.MjModel.from_xml_path(
+        str(
+            BFM_ZERO_DEPLOY_ROOT / "data" / "robots" / "g1" / "scene_29dof_freebase.xml"
+        )
+    )
     data = rt.mujoco.MjData(model)
-    policy_config = load_yaml(BFM_ZERO_DEPLOY_ROOT / "config" / "policy" / "motivo_newG1.yaml")
+    policy_config = load_yaml(
+        BFM_ZERO_DEPLOY_ROOT / "config" / "policy" / "motivo_newG1.yaml"
+    )
     joint_names = [str(name) for name in policy_config["isaac_joint_names"]]
     joint_qpos_ids, joint_qvel_ids, _ = build_joint_mappings(rt, model, joint_names)
     body_ids, pelvis_body_id, extend_parent_body_id = build_body_ids(rt, model)
     target_body_pos = load_target_body_positions(
-        rt, model, data, source.goal_key, joint_qpos_ids, body_ids, extend_parent_body_id
+        rt,
+        model,
+        data,
+        source.goal_key,
+        joint_qpos_ids,
+        body_ids,
+        extend_parent_body_id,
     )
     model_metadata = dict(source.model)
     if source.goal_z is None:
         goal_context_path = Path(
             model_metadata.get(
-                "goal_context_path", BFM_ZERO_DEPLOY_ROOT / "model/goal_inference/goal_reaching.pkl"
+                "goal_context_path",
+                BFM_ZERO_DEPLOY_ROOT / "model/goal_inference/goal_reaching.pkl",
             )
         )
         goal_latents = rt.joblib.load(goal_context_path)
@@ -2048,25 +2516,37 @@ def stage3(args: argparse.Namespace) -> int:
             goal_latents[source.goal_key], dtype=rt.np.float32
         ).reshape(-1)
     else:
-        target_goal_latent = rt.np.asarray(source.goal_z, dtype=rt.np.float32).reshape(-1)
-    checkpoint_path = Path(model_metadata.get("checkpoint_path", BFM_ZERO_DEPLOY_ROOT / "model/checkpoint"))
+        target_goal_latent = rt.np.asarray(source.goal_z, dtype=rt.np.float32).reshape(
+            -1
+        )
+    checkpoint_path = Path(
+        model_metadata.get("checkpoint_path", BFM_ZERO_DEPLOY_ROOT / "model/checkpoint")
+    )
     latent_device = "cuda" if rt.torch.cuda.is_available() else "cpu"
-    latent_model = rt.load_model_from_checkpoint_dir(str(checkpoint_path), device=latent_device)
+    latent_model = rt.load_model_from_checkpoint_dir(
+        str(checkpoint_path), device=latent_device
+    )
     latent_model.eval()
 
     trajectories = [
         {"time_s": trial.time_s, "qpos": trial.qpos, "qvel": trial.qvel}
         for trial in trials
     ]
-    time_vectors = [rt.np.asarray(traj["time_s"], dtype=rt.np.float32) for traj in trajectories]
+    time_vectors = [
+        rt.np.asarray(traj["time_s"], dtype=rt.np.float32) for traj in trajectories
+    ]
     max_steps = max(int(time_vec.shape[0]) for time_vec in time_vectors)
-    reference_idx = max(range(len(time_vectors)), key=lambda idx: int(time_vectors[idx].shape[0]))
+    reference_idx = max(
+        range(len(time_vectors)), key=lambda idx: int(time_vectors[idx].shape[0])
+    )
     time_s = time_vectors[reference_idx]
     num_runs = len(run_summaries)
     rollout_steps = int(max_steps)
 
     mpjpe_mm = rt.np.full((num_runs, rollout_steps), rt.np.nan, dtype=rt.np.float32)
-    latent_cosine = rt.np.full((num_runs, rollout_steps), rt.np.nan, dtype=rt.np.float32)
+    latent_cosine = rt.np.full(
+        (num_runs, rollout_steps), rt.np.nan, dtype=rt.np.float32
+    )
     root_z = rt.np.full((num_runs, rollout_steps), rt.np.nan, dtype=rt.np.float32)
     success = rt.np.zeros(num_runs, dtype=bool)
     trajectory_lengths = rt.np.zeros(num_runs, dtype=rt.np.int32)
@@ -2076,14 +2556,18 @@ def stage3(args: argparse.Namespace) -> int:
         qvel = rt.np.asarray(traj["qvel"], dtype=rt.np.float32)
         run_steps = int(qpos.shape[0])
         if qvel.shape[0] != run_steps:
-            raise ValueError(f"Run {run_idx} qvel length mismatch: {qvel.shape[0]} vs {run_steps}")
+            raise ValueError(
+                f"Run {run_idx} qvel length mismatch: {qvel.shape[0]} vs {run_steps}"
+            )
         trajectory_lengths[run_idx] = run_steps
         backward_batches: dict[str, list[Any]] = {"state": [], "privileged_state": []}
         for step_idx in range(run_steps):
             data.qpos[:] = qpos[step_idx]
             data.qvel[:] = qvel[step_idx]
             rt.mujoco.mj_forward(model, data)
-            body_pos, body_rot, body_vel, body_ang_vel = extract_body_state(rt, model, data, body_ids, extend_parent_body_id)
+            body_pos, body_rot, body_vel, body_ang_vel = extract_body_state(
+                rt, model, data, body_ids, extend_parent_body_id
+            )
             backward_obs = build_backward_obs(
                 rt,
                 body_pos,
@@ -2095,15 +2579,23 @@ def stage3(args: argparse.Namespace) -> int:
             )
             for key in backward_batches:
                 backward_batches[key].append(backward_obs[key])
-            mpjpe_mm[run_idx, step_idx] = float(rt.np.linalg.norm(body_pos - target_body_pos, axis=-1).mean() * 1000.0)
+            mpjpe_mm[run_idx, step_idx] = float(
+                rt.np.linalg.norm(body_pos - target_body_pos, axis=-1).mean() * 1000.0
+            )
             root_z[run_idx, step_idx] = float(body_pos[0, 2])
         backward_batch = {
             key: rt.torch.cat(values, dim=0).to(latent_device)
             for key, values in backward_batches.items()
         }
         with rt.torch.inference_mode():
-            z_batch = latent_model.project_z(latent_model.backward_map(backward_batch)).cpu().numpy()
-        denom = rt.np.linalg.norm(z_batch, axis=1) * rt.np.linalg.norm(target_goal_latent)
+            z_batch = (
+                latent_model.project_z(latent_model.backward_map(backward_batch))
+                .cpu()
+                .numpy()
+            )
+        denom = rt.np.linalg.norm(z_batch, axis=1) * rt.np.linalg.norm(
+            target_goal_latent
+        )
         latent_cosine[run_idx, :run_steps] = rt.np.clip(
             (z_batch @ target_goal_latent) / rt.np.maximum(denom, 1e-12), -1.0, 1.0
         )
@@ -2130,9 +2622,30 @@ def stage3(args: argparse.Namespace) -> int:
     mpjpe_plot = stage3_dir / "mpjpe_lines.png"
     latent_plot = stage3_dir / "latent_cosine_lines.png"
     root_z_plot = stage3_dir / "base_height_lines.png"
-    write_plot(rt, mpjpe_mm, time_s, f"BFM-Zero Fallen-Recovery MPJPE ({title_suffix})", "MPJPE (mm)", mpjpe_plot)
-    write_plot(rt, latent_cosine, time_s, f"BFM-Zero Fallen-Recovery Latent Cosine ({title_suffix})", "Cosine Similarity", latent_plot)
-    write_plot(rt, root_z, time_s, f"BFM-Zero Fallen-Recovery Base Height ({title_suffix})", "Pelvis Height (m)", root_z_plot)
+    write_plot(
+        rt,
+        mpjpe_mm,
+        time_s,
+        f"BFM-Zero Fallen-Recovery MPJPE ({title_suffix})",
+        "MPJPE (mm)",
+        mpjpe_plot,
+    )
+    write_plot(
+        rt,
+        latent_cosine,
+        time_s,
+        f"BFM-Zero Fallen-Recovery Latent Cosine ({title_suffix})",
+        "Cosine Similarity",
+        latent_plot,
+    )
+    write_plot(
+        rt,
+        root_z,
+        time_s,
+        f"BFM-Zero Fallen-Recovery Base Height ({title_suffix})",
+        "Pelvis Height (m)",
+        root_z_plot,
+    )
 
     tiled_video = stage3_dir / "tiled_runs.mp4"
     grid_rows, grid_cols, video_width, video_height = render_tiled_video_from_trials(
@@ -2152,16 +2665,21 @@ def stage3(args: argparse.Namespace) -> int:
     stage1_video_width: int | None = None
     stage1_video_height: int | None = None
     if stage1_manifest is not None:
-        stage1_grid_rows, stage1_grid_cols, stage1_video_width, stage1_video_height = render_tiled_video_from_paths(
-            rt,
-            model,
-            data,
-            pelvis_body_id,
-            [REPO_ROOT / str(row["settle_trajectory_path"]) for row in stage1_manifest["states"]],
-            args.video_fps,
-            args.render_width,
-            args.render_height,
-            stage1_tiled_video,
+        stage1_grid_rows, stage1_grid_cols, stage1_video_width, stage1_video_height = (
+            render_tiled_video_from_paths(
+                rt,
+                model,
+                data,
+                pelvis_body_id,
+                [
+                    REPO_ROOT / str(row["settle_trajectory_path"])
+                    for row in stage1_manifest["states"]
+                ],
+                args.video_fps,
+                args.render_width,
+                args.render_height,
+                stage1_tiled_video,
+            )
         )
 
     latent_min = float(rt.np.nanmin(latent_cosine))
@@ -2194,7 +2712,8 @@ def stage3(args: argparse.Namespace) -> int:
                 data,
                 pelvis_body_id,
                 failed_runs,
-                lambda run_summary: REPO_ROOT / str(run_summary["source_state"]["settle_trajectory_path"]),
+                lambda run_summary: REPO_ROOT
+                / str(run_summary["source_state"]["settle_trajectory_path"]),
                 args.video_fps,
                 args.failed_render_width,
                 args.failed_render_height,
@@ -2202,9 +2721,17 @@ def stage3(args: argparse.Namespace) -> int:
                 "failed_settle_videos_index.json",
                 lambda run_name, state_id: f"{run_name}_{state_id}_settle_1080p.mp4",
             )
-    elif source.source_kind == "fast_replay_v2" and failed_trials and args.render_failed_videos:
+    elif (
+        source.source_kind == "fast_replay_v2"
+        and failed_trials
+        and args.render_failed_videos
+    ):
         renderer, camera = build_renderer(
-            rt, model, args.failed_render_width, args.failed_render_height, pelvis_body_id
+            rt,
+            model,
+            args.failed_render_width,
+            args.failed_render_height,
+            pelvis_body_id,
         )
         try:
             for trial in failed_trials:
@@ -2245,7 +2772,9 @@ def stage3(args: argparse.Namespace) -> int:
         "num_runs": num_runs,
         "goal_key": source.goal_key,
         "goal_z": target_goal_latent.tolist(),
-        "goal_z_sha256": hashlib.sha256(target_goal_latent.astype(rt.np.float32).tobytes()).hexdigest(),
+        "goal_z_sha256": hashlib.sha256(
+            target_goal_latent.astype(rt.np.float32).tobytes()
+        ).hexdigest(),
         "seed": source.seed,
         "fallen_z_threshold_m": source.fallen_z_threshold_m,
         "recovery_z_threshold_m": source.recovery_z_threshold_m,
@@ -2261,12 +2790,24 @@ def stage3(args: argparse.Namespace) -> int:
         "stage1_video_width": stage1_video_width,
         "stage1_video_height": stage1_video_height,
         "sanity": {
-            "mpjpe_recorded_finite": bool(rt.np.all(rt.np.isfinite(mpjpe_mm[~rt.np.isnan(mpjpe_mm)]))),
-            "latent_cosine_recorded_finite": bool(rt.np.all(rt.np.isfinite(latent_cosine[~rt.np.isnan(latent_cosine)]))),
-            "latent_cosine_in_range": bool(latent_min >= -1.0001 and latent_max <= 1.0001),
-            "root_z_recorded_finite": bool(rt.np.all(rt.np.isfinite(root_z[~rt.np.isnan(root_z)]))),
-            "variable_length_trajectories": bool(len({int(v) for v in trajectory_lengths.tolist()}) > 1),
-            "full_grid_1920x1080": bool(num_runs == 100 and video_width == 1920 and video_height == 1080),
+            "mpjpe_recorded_finite": bool(
+                rt.np.all(rt.np.isfinite(mpjpe_mm[~rt.np.isnan(mpjpe_mm)]))
+            ),
+            "latent_cosine_recorded_finite": bool(
+                rt.np.all(rt.np.isfinite(latent_cosine[~rt.np.isnan(latent_cosine)]))
+            ),
+            "latent_cosine_in_range": bool(
+                latent_min >= -1.0001 and latent_max <= 1.0001
+            ),
+            "root_z_recorded_finite": bool(
+                rt.np.all(rt.np.isfinite(root_z[~rt.np.isnan(root_z)]))
+            ),
+            "variable_length_trajectories": bool(
+                len({int(v) for v in trajectory_lengths.tolist()}) > 1
+            ),
+            "full_grid_1920x1080": bool(
+                num_runs == 100 and video_width == 1920 and video_height == 1080
+            ),
             "full_stage1_grid_1920x1080": bool(
                 stage1_video_width is not None
                 and stage1_video_height is not None
@@ -2285,10 +2826,16 @@ def stage3(args: argparse.Namespace) -> int:
         },
     }
     if source.source_kind == "stage2":
-        summary_payload["stage2_summary"] = repo_rel(Path(source.metadata["summary_path"]))
+        summary_payload["stage2_summary"] = repo_rel(
+            Path(source.metadata["summary_path"])
+        )
     else:
-        summary_payload["fast_manifest"] = repo_rel(Path(source.metadata["manifest_path"]))
-        summary_payload["fast_summary"] = repo_rel(Path(source.metadata["summary_path"]))
+        summary_payload["fast_manifest"] = repo_rel(
+            Path(source.metadata["manifest_path"])
+        )
+        summary_payload["fast_summary"] = repo_rel(
+            Path(source.metadata["summary_path"])
+        )
         summary_payload["selected_rows"] = source.metadata["selected_rows"]
         selected_rounds = sorted(
             {int(row["round_index"]) for row in source.metadata["selected_rows"]}
@@ -2304,22 +2851,36 @@ def stage3(args: argparse.Namespace) -> int:
             },
         }
     if stage1_manifest_rel:
-        summary_payload["stage1_manifest"] = repo_rel(REPO_ROOT / str(stage1_manifest_rel))
-        summary_payload["stage1_summary"] = repo_rel(stage1_summary_path((REPO_ROOT / str(stage1_manifest_rel)).parent))
-        summary_payload["artifacts"]["stage1_tiled_settle_video"] = repo_rel(stage1_tiled_video)
+        summary_payload["stage1_manifest"] = repo_rel(
+            REPO_ROOT / str(stage1_manifest_rel)
+        )
+        summary_payload["stage1_summary"] = repo_rel(
+            stage1_summary_path((REPO_ROOT / str(stage1_manifest_rel)).parent)
+        )
+        summary_payload["artifacts"]["stage1_tiled_settle_video"] = repo_rel(
+            stage1_tiled_video
+        )
     if failed_recovery_index is not None:
-        summary_payload["artifacts"]["failed_videos_index"] = repo_rel(failed_recovery_index)
+        summary_payload["artifacts"]["failed_videos_index"] = repo_rel(
+            failed_recovery_index
+        )
         summary_payload["artifacts"]["failed_videos_1080p"] = failed_recovery_videos
     if failed_settle_index is not None:
-        summary_payload["artifacts"]["failed_settle_videos_index"] = repo_rel(failed_settle_index)
-        summary_payload["artifacts"]["failed_settle_videos_1080p"] = failed_settle_videos
+        summary_payload["artifacts"]["failed_settle_videos_index"] = repo_rel(
+            failed_settle_index
+        )
+        summary_payload["artifacts"]["failed_settle_videos_1080p"] = (
+            failed_settle_videos
+        )
     write_json(stage3_summary_path(stage3_dir), summary_payload)
     print(
         json.dumps(
             {
                 "stage3_summary": repo_rel(stage3_summary_path(stage3_dir)),
                 "video": repo_rel(tiled_video),
-                "stage1_video": repo_rel(stage1_tiled_video) if stage1_manifest_rel else None,
+                "stage1_video": repo_rel(stage1_tiled_video)
+                if stage1_manifest_rel
+                else None,
             },
             indent=2,
         )
@@ -2334,38 +2895,64 @@ def manifest_seed_from_stage2(stage2_summary: dict[str, Any]) -> int:
     return int(stage2_summary.get("seed", 0))
 
 
-def load_stage2_context(stage2_dir: Path) -> tuple[dict[str, Any], dict[str, Any] | None, EvalLayout, list[dict[str, Any]], dict[str, dict[str, Any]]]:
+def load_stage2_context(
+    stage2_dir: Path,
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any] | None,
+    EvalLayout,
+    list[dict[str, Any]],
+    dict[str, dict[str, Any]],
+]:
     summary = load_json(stage2_summary_path(stage2_dir))
     run_id = str(summary["run_id"])
     layout = build_layout(run_id)
-    run_summaries = [load_json(REPO_ROOT / str(path)) for path in summary["run_summaries"]]
-    manifest = load_json(REPO_ROOT / str(summary["stage1_manifest"])) if summary.get("stage1_manifest") else None
+    run_summaries = [
+        load_json(REPO_ROOT / str(path)) for path in summary["run_summaries"]
+    ]
+    manifest = (
+        load_json(REPO_ROOT / str(summary["stage1_manifest"]))
+        if summary.get("stage1_manifest")
+        else None
+    )
     if manifest is not None:
         states_by_id = {str(row["state_id"]): row for row in manifest["states"]}
     else:
         states_by_id = {
             str(row["source_state"]["state_id"]): dict(row["source_state"])
             for row in run_summaries
-            if isinstance(row.get("source_state"), dict) and row["source_state"].get("state_id")
+            if isinstance(row.get("source_state"), dict)
+            and row["source_state"].get("state_id")
         }
     return summary, manifest, layout, run_summaries, states_by_id
 
 
 def build_model_context(rt: SimpleNamespace) -> dict[str, Any]:
-    model = rt.mujoco.MjModel.from_xml_path(str(BFM_ZERO_DEPLOY_ROOT / "data" / "robots" / "g1" / "scene_29dof_freebase.xml"))
+    model = rt.mujoco.MjModel.from_xml_path(
+        str(
+            BFM_ZERO_DEPLOY_ROOT / "data" / "robots" / "g1" / "scene_29dof_freebase.xml"
+        )
+    )
     data = rt.mujoco.MjData(model)
-    policy_config = load_yaml(BFM_ZERO_DEPLOY_ROOT / "config" / "policy" / "motivo_newG1.yaml")
+    policy_config = load_yaml(
+        BFM_ZERO_DEPLOY_ROOT / "config" / "policy" / "motivo_newG1.yaml"
+    )
     robot_config = load_yaml(BFM_ZERO_DEPLOY_ROOT / "config" / "robot" / "g1.yaml")
     joint_names = [str(name) for name in policy_config["isaac_joint_names"]]
     joint_qpos_ids, joint_qvel_ids, _ = build_joint_mappings(rt, model, joint_names)
     body_ids, pelvis_body_id, extend_parent_body_id = build_body_ids(rt, model)
-    default_dof_angles = resolve_joint_array(rt, policy_config["default_joint_pos"], joint_names)
+    default_dof_angles = resolve_joint_array(
+        rt, policy_config["default_joint_pos"], joint_names
+    )
     left_right_pairs = [
         (name, name.replace("left_", "right_"))
         for name in joint_names
         if name.startswith("left_") and name.replace("left_", "right_") in joint_names
     ]
-    pair_indices = [(joint_names.index(left), joint_names.index(right), left, right) for left, right in left_right_pairs]
+    pair_indices = [
+        (joint_names.index(left), joint_names.index(right), left, right)
+        for left, right in left_right_pairs
+    ]
     leg_joint_indices = [
         idx
         for idx, name in enumerate(joint_names)
@@ -2376,7 +2963,9 @@ def build_model_context(rt: SimpleNamespace) -> dict[str, Any]:
         for idx, name in enumerate(joint_names)
         if any(token in name for token in ("shoulder_", "elbow_", "wrist_"))
     ]
-    waist_joint_indices = [idx for idx, name in enumerate(joint_names) if name.startswith("waist_")]
+    waist_joint_indices = [
+        idx for idx, name in enumerate(joint_names) if name.startswith("waist_")
+    ]
     return {
         "model": model,
         "data": data,
@@ -2432,7 +3021,9 @@ def classify_root_orientation(rt: SimpleNamespace, quat_wxyz: Any) -> str:
     return "left_side" if sign > 0.0 else "right_side"
 
 
-def contact_features_for_state(rt: SimpleNamespace, model: Any, data: Any) -> dict[str, Any]:
+def contact_features_for_state(
+    rt: SimpleNamespace, model: Any, data: Any
+) -> dict[str, Any]:
     return contact_summary_for_current_state(rt, model, data)
 
 
@@ -2465,7 +3056,13 @@ def cohen_d(rt: SimpleNamespace, a: Any, b: Any) -> float:
 def point_biserial(rt: SimpleNamespace, values: Any, labels: Any) -> float:
     x = rt.np.asarray(values, dtype=rt.np.float64)
     y = rt.np.asarray(labels, dtype=rt.np.float64)
-    if x.size == 0 or y.size == 0 or x.size != y.size or rt.np.std(x) == 0.0 or rt.np.std(y) == 0.0:
+    if (
+        x.size == 0
+        or y.size == 0
+        or x.size != y.size
+        or rt.np.std(x) == 0.0
+        or rt.np.std(y) == 0.0
+    ):
         return 0.0
     return float(rt.np.corrcoef(x, y)[0, 1])
 
@@ -2484,10 +3081,14 @@ def render_video_from_qpos(
 ) -> None:
     if rt.imageio is None:
         raise ModuleNotFoundError("imageio is required for video export")
-    writer = rt.imageio.get_writer(output_path, fps=fps, codec="libx264", macro_block_size=None)
+    writer = rt.imageio.get_writer(
+        output_path, fps=fps, codec="libx264", macro_block_size=None
+    )
     try:
         for sample_idx in sample_indices:
-            frame = render_frame(rt, renderer, camera, model, data, pelvis_body_id, qpos[int(sample_idx)])
+            frame = render_frame(
+                rt, renderer, camera, model, data, pelvis_body_id, qpos[int(sample_idx)]
+            )
             writer.append_data(frame)
     finally:
         writer.close()
@@ -2507,17 +3108,39 @@ def render_tiled_video_from_paths(
     trajectories = [rt.np.load(path) for path in trajectory_paths]
     if not trajectories:
         raise ValueError("No trajectories were provided for tiled rendering")
-    max_duration_s = max(float(rt.np.asarray(traj["time_s"], dtype=rt.np.float32)[-1]) for traj in trajectories)
-    render_times = rt.np.arange(0.0, max_duration_s + 1e-9, 1.0 / fps, dtype=rt.np.float32)
-    renderer, camera = build_renderer(rt, model, render_width, render_height, pelvis_body_id)
-    frames = rt.np.zeros((len(trajectories), len(render_times), render_height, render_width, 3), dtype=rt.np.uint8)
+    max_duration_s = max(
+        float(rt.np.asarray(traj["time_s"], dtype=rt.np.float32)[-1])
+        for traj in trajectories
+    )
+    render_times = rt.np.arange(
+        0.0, max_duration_s + 1e-9, 1.0 / fps, dtype=rt.np.float32
+    )
+    renderer, camera = build_renderer(
+        rt, model, render_width, render_height, pelvis_body_id
+    )
+    frames = rt.np.zeros(
+        (len(trajectories), len(render_times), render_height, render_width, 3),
+        dtype=rt.np.uint8,
+    )
     try:
         for run_idx, traj in enumerate(trajectories):
             time_s = rt.np.asarray(traj["time_s"], dtype=rt.np.float32)
             qpos = rt.np.asarray(traj["qpos"], dtype=rt.np.float32)
-            sample_indices = rt.np.clip(rt.np.searchsorted(time_s, render_times, side="left"), 0, len(time_s) - 1)
+            sample_indices = rt.np.clip(
+                rt.np.searchsorted(time_s, render_times, side="left"),
+                0,
+                len(time_s) - 1,
+            )
             for frame_idx, sample_idx in enumerate(sample_indices):
-                frames[run_idx, frame_idx] = render_frame(rt, renderer, camera, model, data, pelvis_body_id, qpos[int(sample_idx)])
+                frames[run_idx, frame_idx] = render_frame(
+                    rt,
+                    renderer,
+                    camera,
+                    model,
+                    data,
+                    pelvis_body_id,
+                    qpos[int(sample_idx)],
+                )
     finally:
         renderer.close()
     return tile_video(rt, frames, fps, output_path)
@@ -2537,21 +3160,34 @@ def render_tiled_video_from_trials(
     if not trials:
         raise ValueError("No trials were provided for tiled rendering")
     max_duration_s = max(float(trial.time_s[-1]) for trial in trials)
-    render_times = rt.np.arange(0.0, max_duration_s + 1e-9, 1.0 / fps, dtype=rt.np.float32)
-    renderer, camera = build_renderer(rt, model, render_width, render_height, pelvis_body_id)
+    render_times = rt.np.arange(
+        0.0, max_duration_s + 1e-9, 1.0 / fps, dtype=rt.np.float32
+    )
+    renderer, camera = build_renderer(
+        rt, model, render_width, render_height, pelvis_body_id
+    )
     frames = rt.np.zeros(
-        (len(trials), len(render_times), render_height, render_width, 3), dtype=rt.np.uint8
+        (len(trials), len(render_times), render_height, render_width, 3),
+        dtype=rt.np.uint8,
     )
     try:
         for run_idx, trial in enumerate(trials):
             time_s = rt.np.asarray(trial.time_s, dtype=rt.np.float32)
             qpos = rt.np.asarray(trial.qpos, dtype=rt.np.float32)
             sample_indices = rt.np.clip(
-                rt.np.searchsorted(time_s, render_times, side="left"), 0, len(time_s) - 1
+                rt.np.searchsorted(time_s, render_times, side="left"),
+                0,
+                len(time_s) - 1,
             )
             for frame_idx, sample_idx in enumerate(sample_indices):
                 frames[run_idx, frame_idx] = render_frame(
-                    rt, renderer, camera, model, data, pelvis_body_id, qpos[int(sample_idx)]
+                    rt,
+                    renderer,
+                    camera,
+                    model,
+                    data,
+                    pelvis_body_id,
+                    qpos[int(sample_idx)],
                 )
     finally:
         renderer.close()
@@ -2572,7 +3208,9 @@ def render_failed_video_group(
     index_name: str,
     file_name_builder: Any,
 ) -> tuple[Path, list[str]]:
-    renderer, camera = build_renderer(rt, model, render_width, render_height, pelvis_body_id)
+    renderer, camera = build_renderer(
+        rt, model, render_width, render_height, pelvis_body_id
+    )
     output_paths: list[str] = []
     try:
         for run_summary in failed_runs:
@@ -2582,9 +3220,26 @@ def render_failed_video_group(
             traj = rt.np.load(trajectory_path_for_run(run_summary))
             time_s = rt.np.asarray(traj["time_s"], dtype=rt.np.float32)
             qpos = rt.np.asarray(traj["qpos"], dtype=rt.np.float32)
-            render_times = rt.np.arange(0.0, float(time_s[-1]) + 1e-9, 1.0 / fps, dtype=rt.np.float32)
-            render_indices = rt.np.clip(rt.np.searchsorted(time_s, render_times, side="left"), 0, len(time_s) - 1)
-            render_video_from_qpos(rt, model, data, renderer, camera, pelvis_body_id, qpos, render_indices, fps, output_path)
+            render_times = rt.np.arange(
+                0.0, float(time_s[-1]) + 1e-9, 1.0 / fps, dtype=rt.np.float32
+            )
+            render_indices = rt.np.clip(
+                rt.np.searchsorted(time_s, render_times, side="left"),
+                0,
+                len(time_s) - 1,
+            )
+            render_video_from_qpos(
+                rt,
+                model,
+                data,
+                renderer,
+                camera,
+                pelvis_body_id,
+                qpos,
+                render_indices,
+                fps,
+                output_path,
+            )
             output_paths.append(repo_rel(output_path))
     finally:
         renderer.close()
@@ -2635,14 +3290,24 @@ def render_failed_videos(args: argparse.Namespace) -> int:
         stage3_summary["artifacts"]["failed_videos_index"] = repo_rel(index_path)
         stage3_summary["artifacts"]["failed_videos_1080p"] = output_paths
         write_json(summary_path, stage3_summary)
-    print(json.dumps({"failed_video_count": len(output_paths), "failed_videos_index": repo_rel(index_path)}, indent=2))
+    print(
+        json.dumps(
+            {
+                "failed_video_count": len(output_paths),
+                "failed_videos_index": repo_rel(index_path),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
 def analyze_failures(args: argparse.Namespace) -> int:
     rt = runtime()
     stage2_dir = Path(args.stage2_dir)
-    summary, manifest, layout, run_summaries, states_by_id = load_stage2_context(stage2_dir)
+    summary, manifest, layout, run_summaries, states_by_id = load_stage2_context(
+        stage2_dir
+    )
     ctx = build_model_context(rt)
     model = ctx["model"]
     data = ctx["data"]
@@ -2656,14 +3321,20 @@ def analyze_failures(args: argparse.Namespace) -> int:
     waist_joint_indices = ctx["waist_joint_indices"]
 
     rows: list[dict[str, Any]] = []
-    joint_pos_matrix = rt.np.zeros((len(run_summaries), len(joint_names)), dtype=rt.np.float64)
-    joint_vel_matrix = rt.np.zeros((len(run_summaries), len(joint_names)), dtype=rt.np.float64)
+    joint_pos_matrix = rt.np.zeros(
+        (len(run_summaries), len(joint_names)), dtype=rt.np.float64
+    )
+    joint_vel_matrix = rt.np.zeros(
+        (len(run_summaries), len(joint_names)), dtype=rt.np.float64
+    )
     fail_mask = rt.np.zeros(len(run_summaries), dtype=bool)
 
     for idx, run_summary in enumerate(run_summaries):
         state_id = str(run_summary["source_state"]["state_id"])
         state_row = states_by_id[state_id]
-        qpos0, qvel0, root_z0 = load_stage_state_npz(REPO_ROOT / str(state_row["state_path"]))
+        qpos0, qvel0, root_z0 = load_stage_state_npz(
+            REPO_ROOT / str(state_row["state_path"])
+        )
         joint_pos = rt.np.asarray(qpos0[joint_qpos_ids], dtype=rt.np.float64)
         joint_vel = rt.np.asarray(qvel0[joint_qvel_ids], dtype=rt.np.float64)
         data.qpos[:] = qpos0
@@ -2673,8 +3344,20 @@ def analyze_failures(args: argparse.Namespace) -> int:
         roll, pitch, yaw = quat_to_rpy_wxyz(qpos0[3:7])
         orientation = classify_root_orientation(rt, qpos0[3:7])
 
-        leg_asymmetry = safe_mean([abs(joint_pos[left] - joint_pos[right]) for left, right, _, _ in pair_indices if left in leg_joint_indices])
-        arm_asymmetry = safe_mean([abs(joint_pos[left] - joint_pos[right]) for left, right, _, _ in pair_indices if left in arm_joint_indices])
+        leg_asymmetry = safe_mean(
+            [
+                abs(joint_pos[left] - joint_pos[right])
+                for left, right, _, _ in pair_indices
+                if left in leg_joint_indices
+            ]
+        )
+        arm_asymmetry = safe_mean(
+            [
+                abs(joint_pos[left] - joint_pos[right])
+                for left, right, _, _ in pair_indices
+                if left in arm_joint_indices
+            ]
+        )
         row = {
             "run_name": Path(str(run_summary["summary_path"])).parent.name,
             "run_index": idx,
@@ -2683,7 +3366,9 @@ def analyze_failures(args: argparse.Namespace) -> int:
             "goal_key": state_row.get("goal_key"),
             "success": bool(run_summary["success"]),
             "failure": not bool(run_summary["success"]),
-            "final_window_mean_root_z_m": float(run_summary["final_window_mean_root_z_m"]),
+            "final_window_mean_root_z_m": float(
+                run_summary["final_window_mean_root_z_m"]
+            ),
             "max_root_z_m": float(run_summary["max_root_z_m"]),
             "initial_root_z_m": float(root_z0),
             "root_xy_radius_m": float(rt.np.linalg.norm(qpos0[0:2])),
@@ -2697,13 +3382,30 @@ def analyze_failures(args: argparse.Namespace) -> int:
             "joint_vel_abs_max": float(rt.np.max(rt.np.abs(joint_vel))),
             "joint_abs_mean_rad": float(rt.np.mean(rt.np.abs(joint_pos))),
             "joint_abs_max_rad": float(rt.np.max(rt.np.abs(joint_pos))),
-            "joint_pos_l2_from_default": float(rt.np.linalg.norm(joint_pos - default_dof_angles)),
-            "leg_joint_abs_mean_rad": float(rt.np.mean(rt.np.abs(joint_pos[leg_joint_indices]))),
-            "arm_joint_abs_mean_rad": float(rt.np.mean(rt.np.abs(joint_pos[arm_joint_indices]))),
-            "waist_abs_sum_rad": float(rt.np.sum(rt.np.abs(joint_pos[waist_joint_indices]))),
-            "hip_pitch_abs_sum_rad": float(abs(joint_pos[joint_names.index("left_hip_pitch_joint")]) + abs(joint_pos[joint_names.index("right_hip_pitch_joint")])),
-            "knee_flex_sum_rad": float(joint_pos[joint_names.index("left_knee_joint")] + joint_pos[joint_names.index("right_knee_joint")]),
-            "ankle_pitch_abs_sum_rad": float(abs(joint_pos[joint_names.index("left_ankle_pitch_joint")]) + abs(joint_pos[joint_names.index("right_ankle_pitch_joint")])),
+            "joint_pos_l2_from_default": float(
+                rt.np.linalg.norm(joint_pos - default_dof_angles)
+            ),
+            "leg_joint_abs_mean_rad": float(
+                rt.np.mean(rt.np.abs(joint_pos[leg_joint_indices]))
+            ),
+            "arm_joint_abs_mean_rad": float(
+                rt.np.mean(rt.np.abs(joint_pos[arm_joint_indices]))
+            ),
+            "waist_abs_sum_rad": float(
+                rt.np.sum(rt.np.abs(joint_pos[waist_joint_indices]))
+            ),
+            "hip_pitch_abs_sum_rad": float(
+                abs(joint_pos[joint_names.index("left_hip_pitch_joint")])
+                + abs(joint_pos[joint_names.index("right_hip_pitch_joint")])
+            ),
+            "knee_flex_sum_rad": float(
+                joint_pos[joint_names.index("left_knee_joint")]
+                + joint_pos[joint_names.index("right_knee_joint")]
+            ),
+            "ankle_pitch_abs_sum_rad": float(
+                abs(joint_pos[joint_names.index("left_ankle_pitch_joint")])
+                + abs(joint_pos[joint_names.index("right_ankle_pitch_joint")])
+            ),
             "leg_asymmetry_l1_rad": float(leg_asymmetry),
             "arm_asymmetry_l1_rad": float(arm_asymmetry),
             "orientation_bin": orientation,
@@ -2797,7 +3499,9 @@ def analyze_failures(args: argparse.Namespace) -> int:
                 "point_biserial": point_biserial(rt, joint_vel_matrix[:, idx], labels),
             }
         )
-    joint_velocity_rankings.sort(key=lambda row: abs(float(row["cohen_d"])), reverse=True)
+    joint_velocity_rankings.sort(
+        key=lambda row: abs(float(row["cohen_d"])), reverse=True
+    )
 
     orientation_stats: list[dict[str, Any]] = []
     for orientation in sorted({str(row["orientation_bin"]) for row in rows}):
@@ -2811,7 +3515,9 @@ def analyze_failures(args: argparse.Namespace) -> int:
                 "failure_rate": float(failed / total) if total else float("nan"),
             }
         )
-    orientation_stats.sort(key=lambda row: (float(row["failure_rate"]), row["count"]), reverse=True)
+    orientation_stats.sort(
+        key=lambda row: (float(row["failure_rate"]), row["count"]), reverse=True
+    )
 
     contact_pair_stats: list[dict[str, Any]] = []
     all_pairs = sorted({pair for row in rows for pair in row["self_contact_pairs"]})
@@ -2828,12 +3534,16 @@ def analyze_failures(args: argparse.Namespace) -> int:
                 "failure_rate": float(failed / total),
             }
         )
-    contact_pair_stats.sort(key=lambda row: (row["failure_rate"], row["failed"], row["count"]), reverse=True)
+    contact_pair_stats.sort(
+        key=lambda row: (row["failure_rate"], row["failed"], row["count"]), reverse=True
+    )
 
     failure_notes = []
     for row in fail_rows:
         run_idx = int(row["run_index"])
-        zscores = rt.np.abs((joint_pos_matrix[run_idx] - success_joint_mean) / success_joint_std)
+        zscores = rt.np.abs(
+            (joint_pos_matrix[run_idx] - success_joint_mean) / success_joint_std
+        )
         top_joint_ids = rt.np.argsort(zscores)[::-1][:3]
         top_joints = [
             {
@@ -2844,7 +3554,11 @@ def analyze_failures(args: argparse.Namespace) -> int:
             }
             for joint_id in top_joint_ids
         ]
-        severity = "near_recovery" if float(row["final_window_mean_root_z_m"]) > 0.6 else "grounded"
+        severity = (
+            "near_recovery"
+            if float(row["final_window_mean_root_z_m"]) > 0.6
+            else "grounded"
+        )
         failure_notes.append(
             {
                 "run_name": row["run_name"],
@@ -2885,9 +3599,13 @@ def analyze_failures(args: argparse.Namespace) -> int:
     failed_video_paths = []
     failed_settle_video_paths = []
     if failed_video_index.exists():
-        failed_video_paths = list(load_json(failed_video_index).get("failed_videos", []))
+        failed_video_paths = list(
+            load_json(failed_video_index).get("failed_videos", [])
+        )
     if failed_settle_video_index.exists():
-        failed_settle_video_paths = list(load_json(failed_settle_video_index).get("failed_videos", []))
+        failed_settle_video_paths = list(
+            load_json(failed_settle_video_index).get("failed_videos", [])
+        )
 
     top_scalar = scalar_rankings[:8]
     top_joints = joint_rankings[:8]
@@ -2923,19 +3641,33 @@ def analyze_failures(args: argparse.Namespace) -> int:
             "## Failed Video Exports",
             "",
             f"- Tiled video: `{repo_rel(layout.stage3_dir / 'tiled_runs.mp4')}`",
-            f"- Stage 1 tiled passive-settle video: `{repo_rel(layout.stage3_dir / 'tiled_stage1_settle.mp4')}`" if summary.get("stage1_manifest") else "- Stage 1 tiled passive-settle video: not available for induced-fall runs",
+            f"- Stage 1 tiled passive-settle video: `{repo_rel(layout.stage3_dir / 'tiled_stage1_settle.mp4')}`"
+            if summary.get("stage1_manifest")
+            else "- Stage 1 tiled passive-settle video: not available for induced-fall runs",
             f"- Failed-video index: `{repo_rel(failed_video_index) if failed_video_index.exists() else 'not generated yet'}`",
-            f"- Failed settle-video index: `{repo_rel(failed_settle_video_index) if failed_settle_video_index.exists() else 'not generated yet'}`" if summary.get("stage1_manifest") else "- Failed settle-video index: not available without Stage 1 settle trajectories",
+            f"- Failed settle-video index: `{repo_rel(failed_settle_video_index) if failed_settle_video_index.exists() else 'not generated yet'}`"
+            if summary.get("stage1_manifest")
+            else "- Failed settle-video index: not available without Stage 1 settle trajectories",
             "",
             "Failed recovery videos:",
         ]
     )
-    report_lines.extend([f"- `{path}`" for path in failed_video_paths] or ["- No failed-video exports were present when this report was generated."])
+    report_lines.extend(
+        [f"- `{path}`" for path in failed_video_paths]
+        or ["- No failed-video exports were present when this report was generated."]
+    )
     report_lines.extend(["", "Failed passive-settle videos:"])
     if summary.get("stage1_manifest"):
-        report_lines.extend([f"- `{path}`" for path in failed_settle_video_paths] or ["- No failed settle-video exports were present when this report was generated."])
+        report_lines.extend(
+            [f"- `{path}`" for path in failed_settle_video_paths]
+            or [
+                "- No failed settle-video exports were present when this report was generated."
+            ]
+        )
     else:
-        report_lines.append("- No Stage 1 settle trajectories exist for induced-fall runs.")
+        report_lines.append(
+            "- No Stage 1 settle trajectories exist for induced-fall runs."
+        )
 
     report_lines.extend(
         [
@@ -2994,7 +3726,9 @@ def analyze_failures(args: argparse.Namespace) -> int:
         ]
     )
     for row in orientation_stats:
-        report_lines.append(f"| `{row['orientation']}` | {row['count']} | {row['failed']} | {row['failure_rate']:.2%} |")
+        report_lines.append(
+            f"| `{row['orientation']}` | {row['count']} | {row['failed']} | {row['failure_rate']:.2%} |"
+        )
 
     report_lines.extend(
         [
@@ -3006,7 +3740,9 @@ def analyze_failures(args: argparse.Namespace) -> int:
         ]
     )
     for row in top_contact_pairs:
-        report_lines.append(f"| `{row['pair']}` | {row['count']} | {row['failed']} | {row['failure_rate']:.2%} |")
+        report_lines.append(
+            f"| `{row['pair']}` | {row['count']} | {row['failed']} | {row['failure_rate']:.2%} |"
+        )
 
     report_lines.extend(
         [
@@ -3019,11 +3755,19 @@ def analyze_failures(args: argparse.Namespace) -> int:
         report_lines.append(f"### `{note['run_name']}` / `{note['state_id']}`")
         report_lines.append("")
         report_lines.append(f"- Severity: `{note['severity']}`")
-        report_lines.append(f"- Final mean root height: `{note['final_window_mean_root_z_m']:.3f} m`")
-        report_lines.append(f"- Max root height during rollout: `{note['max_root_z_m']:.3f} m`")
+        report_lines.append(
+            f"- Final mean root height: `{note['final_window_mean_root_z_m']:.3f} m`"
+        )
+        report_lines.append(
+            f"- Max root height during rollout: `{note['max_root_z_m']:.3f} m`"
+        )
         report_lines.append(f"- Orientation bin: `{note['orientation_bin']}`")
-        report_lines.append(f"- Self-contact pairs: `{'; '.join(note['self_contact_pairs']) if note['self_contact_pairs'] else 'none'}`")
-        report_lines.append(f"- Floor-contact bodies: `{'; '.join(note['floor_contact_bodies']) if note['floor_contact_bodies'] else 'none'}`")
+        report_lines.append(
+            f"- Self-contact pairs: `{'; '.join(note['self_contact_pairs']) if note['self_contact_pairs'] else 'none'}`"
+        )
+        report_lines.append(
+            f"- Floor-contact bodies: `{'; '.join(note['floor_contact_bodies']) if note['floor_contact_bodies'] else 'none'}`"
+        )
         report_lines.append("- Strongest joint-position deviations vs success set:")
         for joint in note["top_joint_outliers"]:
             report_lines.append(
@@ -3039,7 +3783,9 @@ def analyze_failures(args: argparse.Namespace) -> int:
             f"- The failed set is small (`{len(fail_rows)}` runs), so the strongest signals should be treated as ranking cues rather than hard causal proof.",
             f"- The single strongest pose-level separator is `{top_scalar[0]['feature']}` with Cohen d `{top_scalar[0]['cohen_d']:.2f}`.",
             f"- The single strongest joint-position separator is `{top_joints[0]['joint']}` with Cohen d `{top_joints[0]['cohen_d']:.2f}`.",
-            f"- The most failure-loaded self-contact pair is `{top_contact_pairs[0]['pair']}` at `{top_contact_pairs[0]['failure_rate']:.2%}` failure rate when present." if top_contact_pairs else "- No self-contact pair appeared often enough to stand out over the success set.",
+            f"- The most failure-loaded self-contact pair is `{top_contact_pairs[0]['pair']}` at `{top_contact_pairs[0]['failure_rate']:.2%}` failure rate when present."
+            if top_contact_pairs
+            else "- No self-contact pair appeared often enough to stand out over the success set.",
             f"- `{sum(1 for note in failure_notes if note['severity'] == 'near_recovery')}` of the `{len(failure_notes)}` failures were near misses; the rest stayed substantially below the recovery threshold.",
             "",
             "## Caveats",
@@ -3056,7 +3802,15 @@ def analyze_failures(args: argparse.Namespace) -> int:
     stage3_summary["artifacts"]["failure_analysis_json"] = repo_rel(analysis_json)
     stage3_summary["artifacts"]["failure_analysis_report"] = repo_rel(report_path)
     write_json(stage3_summary_path(layout.stage3_dir), stage3_summary)
-    print(json.dumps({"failure_analysis_report": repo_rel(report_path), "failure_analysis_json": repo_rel(analysis_json)}, indent=2))
+    print(
+        json.dumps(
+            {
+                "failure_analysis_report": repo_rel(report_path),
+                "failure_analysis_json": repo_rel(analysis_json),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -3085,7 +3839,9 @@ def sim_runner(args: argparse.Namespace) -> int:
     elastic_band_auto_released = False
     if scene_config.get("ENABLE_ELASTIC_BAND", False):
         elastic_band = rt.ElasticBand()
-        elastic_band.length += 0.1 * int(scene_config.get("ELASTIC_BAND_INITIAL_LENGTH_STEPS", 0))
+        elastic_band.length += 0.1 * int(
+            scene_config.get("ELASTIC_BAND_INITIAL_LENGTH_STEPS", 0)
+        )
         if "h1" in robot_config["ROBOT_TYPE"] or "g1" in robot_config["ROBOT_TYPE"]:
             band_attached_link = model.body("torso_link").id
         else:
@@ -3115,10 +3871,16 @@ def sim_runner(args: argparse.Namespace) -> int:
             elastic_band.enable = False
         if band_attached_link is not None:
             data.xfrc_applied[band_attached_link, :3] = 0.0
-        if elastic_band is not None and elastic_band.enable and band_attached_link is not None:
+        if (
+            elastic_band is not None
+            and elastic_band.enable
+            and band_attached_link is not None
+        ):
             pos = data.xpos[band_attached_link]
             lin_vel = data.cvel[band_attached_link, 3:6]
-            data.xfrc_applied[band_attached_link, :3] = elastic_band.Advance(pos, lin_vel)
+            data.xfrc_applied[band_attached_link, :3] = elastic_band.Advance(
+                pos, lin_vel
+            )
         triggered_now = disturbance_controller.step()
         trigger_sample = None
         if triggered_now:
@@ -3134,7 +3896,9 @@ def sim_runner(args: argparse.Namespace) -> int:
         return triggered_now, trigger_sample
 
     if not args.trajectory_path or not args.summary_path or not args.done_file:
-        raise ValueError(f"{args.mode} mode requires --trajectory-path, --summary-path, and --done-file")
+        raise ValueError(
+            f"{args.mode} mode requires --trajectory-path, --summary-path, and --done-file"
+        )
 
     if args.mode == "replay":
         steps = int(round(args.horizon_s / sim_dt))
@@ -3193,7 +3957,10 @@ def sim_runner(args: argparse.Namespace) -> int:
                 "max_root_z_m": float(root_z_log.max()),
             },
         )
-        write_json(Path(args.done_file), {"created_at": now_iso(), "summary_path": str(args.summary_path)})
+        write_json(
+            Path(args.done_file),
+            {"created_at": now_iso(), "summary_path": str(args.summary_path)},
+        )
         return 0
 
     if args.mode != "induce":
@@ -3215,8 +3982,12 @@ def sim_runner(args: argparse.Namespace) -> int:
     perturbation_success = False
     start_sim_time_s: float | None = None
     observation_start_time_s: float | None = None
-    invalid_root_z_min_m = float(scene_config.get("INVALID_ROOT_Z_MIN_M", DEFAULT_INVALID_ROOT_Z_MIN_M))
-    invalid_root_z_max_m = float(scene_config.get("INVALID_ROOT_Z_MAX_M", DEFAULT_INVALID_ROOT_Z_MAX_M))
+    invalid_root_z_min_m = float(
+        scene_config.get("INVALID_ROOT_Z_MIN_M", DEFAULT_INVALID_ROOT_Z_MIN_M)
+    )
+    invalid_root_z_max_m = float(
+        scene_config.get("INVALID_ROOT_Z_MAX_M", DEFAULT_INVALID_ROOT_Z_MAX_M)
+    )
     qpos_log: list[Any] = []
     qvel_log: list[Any] = []
     root_z_log: list[float] = []
@@ -3235,7 +4006,10 @@ def sim_runner(args: argparse.Namespace) -> int:
 
         if started and not observation_started:
             history.append(stability_sample(rt, data, pelvis_body_id, joint_qvel_ids))
-            enough_wait = start_sim_time_s is not None and float(data.time) - start_sim_time_s >= post_start_min_wait_s
+            enough_wait = (
+                start_sim_time_s is not None
+                and float(data.time) - start_sim_time_s >= post_start_min_wait_s
+            )
             ready_for_disturbance = bool(
                 sim_bridge.has_received_command
                 and enough_wait
@@ -3265,12 +4039,19 @@ def sim_runner(args: argparse.Namespace) -> int:
             force=not started or ready_for_disturbance or observation_started,
         )
 
-        if started and not observation_started and timeout_deadline_s is not None and time.monotonic() >= timeout_deadline_s:
+        if (
+            started
+            and not observation_started
+            and timeout_deadline_s is not None
+            and time.monotonic() >= timeout_deadline_s
+        ):
             failure_reason = "timed_out_waiting_for_disturbance"
             break
 
         triggered_now, trigger_sample = sim_step()
-        if not rt.np.all(rt.np.isfinite(data.qpos)) or not rt.np.all(rt.np.isfinite(data.qvel)):
+        if not rt.np.all(rt.np.isfinite(data.qpos)) or not rt.np.all(
+            rt.np.isfinite(data.qvel)
+        ):
             failure_reason = "simulation_invalid"
             break
         if (
@@ -3286,7 +4067,11 @@ def sim_runner(args: argparse.Namespace) -> int:
 
         if triggered_now and not observation_started and trigger_sample is not None:
             observation_started = True
-            observation_start_time_s = float(disturbance_controller.last_event.sim_time_s if disturbance_controller.last_event else data.time)
+            observation_start_time_s = float(
+                disturbance_controller.last_event.sim_time_s
+                if disturbance_controller.last_event
+                else data.time
+            )
             qpos_log.append(trigger_sample["qpos"])
             qvel_log.append(trigger_sample["qvel"])
             root_z_log.append(float(trigger_sample["root_z"]))
@@ -3304,7 +4089,10 @@ def sim_runner(args: argparse.Namespace) -> int:
             sim_time_log.append(float(data.time))
             if elapsed_s <= 1.0 + 1e-9 and root_z_value < args.fallen_z:
                 perturbation_success = True
-            if root_z_value < invalid_root_z_min_m or root_z_value > invalid_root_z_max_m:
+            if (
+                root_z_value < invalid_root_z_min_m
+                or root_z_value > invalid_root_z_max_m
+            ):
                 failure_reason = "simulation_unrealistic_root_height"
                 break
             if elapsed_s >= args.horizon_s - 1e-9:
@@ -3324,8 +4112,12 @@ def sim_runner(args: argparse.Namespace) -> int:
         "success": False,
         "perturbation_success": perturbation_success,
         "failure_reason": failure_reason,
-        "disturbance_method": None if disturbance_controller.last_event is None else disturbance_controller.last_event.method,
-        "disturbance_event": None if disturbance_controller.last_event is None else disturbance_controller.last_event.to_dict(),
+        "disturbance_method": None
+        if disturbance_controller.last_event is None
+        else disturbance_controller.last_event.method,
+        "disturbance_event": None
+        if disturbance_controller.last_event is None
+        else disturbance_controller.last_event.to_dict(),
         "final_window_mean_root_z_m": float("nan"),
         "max_root_z_m": float("nan"),
         "min_root_z_first_1s_m": float("nan"),
@@ -3348,13 +4140,21 @@ def sim_runner(args: argparse.Namespace) -> int:
         final_window_mask = time_arr >= max(0.0, float(time_arr[-1]) - 0.5)
         final_window_mean = float(root_z_arr[final_window_mask].mean())
         first_window_mask = time_arr <= 1.0 + 1e-9
-        min_root_z_first_1s = float(root_z_arr[first_window_mask].min()) if first_window_mask.any() else float("nan")
+        min_root_z_first_1s = (
+            float(root_z_arr[first_window_mask].min())
+            if first_window_mask.any()
+            else float("nan")
+        )
         summary_payload["steps"] = int(qpos_arr.shape[0])
-        summary_payload["success"] = bool(not failure_reason and final_window_mean > args.recovery_z)
+        summary_payload["success"] = bool(
+            not failure_reason and final_window_mean > args.recovery_z
+        )
         summary_payload["final_window_mean_root_z_m"] = final_window_mean
         summary_payload["max_root_z_m"] = float(root_z_arr.max())
         summary_payload["min_root_z_first_1s_m"] = min_root_z_first_1s
-        summary_payload["perturbation_success"] = bool(min_root_z_first_1s < args.fallen_z)
+        summary_payload["perturbation_success"] = bool(
+            min_root_z_first_1s < args.fallen_z
+        )
 
     write_json(Path(args.summary_path), summary_payload)
     disturbance_controller.maybe_write_status(
@@ -3369,12 +4169,17 @@ def sim_runner(args: argparse.Namespace) -> int:
         },
         force=True,
     )
-    write_json(Path(args.done_file), {"created_at": now_iso(), "summary_path": str(args.summary_path)})
+    write_json(
+        Path(args.done_file),
+        {"created_at": now_iso(), "summary_path": str(args.summary_path)},
+    )
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="BFM-Zero fallen-recovery evaluation workflow")
+    parser = argparse.ArgumentParser(
+        description="BFM-Zero fallen-recovery evaluation workflow"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     p1 = subparsers.add_parser("stage1", help="Generate static fallen initial states")
@@ -3393,7 +4198,10 @@ def build_parser() -> argparse.ArgumentParser:
     p1.add_argument("--stable-root-span-m", type=float, default=0.03)
     p1.add_argument("--port-base", type=int, default=26000)
 
-    p2 = subparsers.add_parser("stage2", help="Replay saved states or induce falls with isolated simulator + deployer runs")
+    p2 = subparsers.add_parser(
+        "stage2",
+        help="Replay saved states or induce falls with isolated simulator + deployer runs",
+    )
     p2.add_argument("--stage1-manifest", type=str, default=None)
     p2.add_argument("--run-id", type=str, default=None)
     p2.add_argument("--seed", type=int, default=0)
@@ -3425,19 +4233,47 @@ def build_parser() -> argparse.ArgumentParser:
     p2.add_argument("--stable-ang-speed-rps", type=float, default=0.75)
     p2.add_argument("--stable-joint-speed-rms", type=float, default=0.6)
     p2.add_argument("--stable-root-span-m", type=float, default=0.03)
-    p2.add_argument("--disturbance-method-override", choices=["mixed", "wrench", "velocity_delta"], default="velocity_delta")
+    p2.add_argument(
+        "--disturbance-method-override",
+        choices=["mixed", "wrench", "velocity_delta"],
+        default="velocity_delta",
+    )
     p2.add_argument("--disturbance-scale-multiplier", type=float, default=1.0)
-    p2.add_argument("--wrench-force-min-n", type=float, default=DEFAULT_WRENCH_FORCE_MIN_N)
-    p2.add_argument("--wrench-force-max-n", type=float, default=DEFAULT_WRENCH_FORCE_MAX_N)
-    p2.add_argument("--wrench-torque-min-nm", type=float, default=DEFAULT_WRENCH_TORQUE_MIN_NM)
-    p2.add_argument("--wrench-torque-max-nm", type=float, default=DEFAULT_WRENCH_TORQUE_MAX_NM)
-    p2.add_argument("--wrench-duration-s", type=float, default=DEFAULT_WRENCH_DURATION_S)
-    p2.add_argument("--linear-velocity-min-mps", type=float, default=DEFAULT_LINEAR_VELOCITY_MIN_MPS)
-    p2.add_argument("--linear-velocity-max-mps", type=float, default=DEFAULT_LINEAR_VELOCITY_MAX_MPS)
-    p2.add_argument("--angular-velocity-min-rps", type=float, default=DEFAULT_ANGULAR_VELOCITY_MIN_RPS)
-    p2.add_argument("--angular-velocity-max-rps", type=float, default=DEFAULT_ANGULAR_VELOCITY_MAX_RPS)
+    p2.add_argument(
+        "--wrench-force-min-n", type=float, default=DEFAULT_WRENCH_FORCE_MIN_N
+    )
+    p2.add_argument(
+        "--wrench-force-max-n", type=float, default=DEFAULT_WRENCH_FORCE_MAX_N
+    )
+    p2.add_argument(
+        "--wrench-torque-min-nm", type=float, default=DEFAULT_WRENCH_TORQUE_MIN_NM
+    )
+    p2.add_argument(
+        "--wrench-torque-max-nm", type=float, default=DEFAULT_WRENCH_TORQUE_MAX_NM
+    )
+    p2.add_argument(
+        "--wrench-duration-s", type=float, default=DEFAULT_WRENCH_DURATION_S
+    )
+    p2.add_argument(
+        "--linear-velocity-min-mps", type=float, default=DEFAULT_LINEAR_VELOCITY_MIN_MPS
+    )
+    p2.add_argument(
+        "--linear-velocity-max-mps", type=float, default=DEFAULT_LINEAR_VELOCITY_MAX_MPS
+    )
+    p2.add_argument(
+        "--angular-velocity-min-rps",
+        type=float,
+        default=DEFAULT_ANGULAR_VELOCITY_MIN_RPS,
+    )
+    p2.add_argument(
+        "--angular-velocity-max-rps",
+        type=float,
+        default=DEFAULT_ANGULAR_VELOCITY_MAX_RPS,
+    )
 
-    p2t = subparsers.add_parser("tune-disturbance", help="Run nominal-vs-0.1x disturbance tuning sweeps")
+    p2t = subparsers.add_parser(
+        "tune-disturbance", help="Run nominal-vs-0.1x disturbance tuning sweeps"
+    )
     p2t.add_argument("--run-id", type=str, default=None)
     p2t.add_argument("--seed", type=int, default=0)
     p2t.add_argument("--goal-key", type=str, default=DEFAULT_GOAL_KEY)
@@ -3467,21 +4303,48 @@ def build_parser() -> argparse.ArgumentParser:
     p2t.add_argument("--stable-ang-speed-rps", type=float, default=0.75)
     p2t.add_argument("--stable-joint-speed-rms", type=float, default=0.6)
     p2t.add_argument("--stable-root-span-m", type=float, default=0.03)
-    p2t.add_argument("--disturbance-method-override", choices=["mixed", "wrench", "velocity_delta"], default="velocity_delta")
+    p2t.add_argument(
+        "--disturbance-method-override",
+        choices=["mixed", "wrench", "velocity_delta"],
+        default="velocity_delta",
+    )
     p2t.add_argument("--disturbance-scale-multiplier", type=float, default=1.0)
-    p2t.add_argument("--wrench-force-min-n", type=float, default=DEFAULT_WRENCH_FORCE_MIN_N)
-    p2t.add_argument("--wrench-force-max-n", type=float, default=DEFAULT_WRENCH_FORCE_MAX_N)
-    p2t.add_argument("--wrench-torque-min-nm", type=float, default=DEFAULT_WRENCH_TORQUE_MIN_NM)
-    p2t.add_argument("--wrench-torque-max-nm", type=float, default=DEFAULT_WRENCH_TORQUE_MAX_NM)
-    p2t.add_argument("--wrench-duration-s", type=float, default=DEFAULT_WRENCH_DURATION_S)
-    p2t.add_argument("--linear-velocity-min-mps", type=float, default=DEFAULT_LINEAR_VELOCITY_MIN_MPS)
-    p2t.add_argument("--linear-velocity-max-mps", type=float, default=DEFAULT_LINEAR_VELOCITY_MAX_MPS)
-    p2t.add_argument("--angular-velocity-min-rps", type=float, default=DEFAULT_ANGULAR_VELOCITY_MIN_RPS)
-    p2t.add_argument("--angular-velocity-max-rps", type=float, default=DEFAULT_ANGULAR_VELOCITY_MAX_RPS)
+    p2t.add_argument(
+        "--wrench-force-min-n", type=float, default=DEFAULT_WRENCH_FORCE_MIN_N
+    )
+    p2t.add_argument(
+        "--wrench-force-max-n", type=float, default=DEFAULT_WRENCH_FORCE_MAX_N
+    )
+    p2t.add_argument(
+        "--wrench-torque-min-nm", type=float, default=DEFAULT_WRENCH_TORQUE_MIN_NM
+    )
+    p2t.add_argument(
+        "--wrench-torque-max-nm", type=float, default=DEFAULT_WRENCH_TORQUE_MAX_NM
+    )
+    p2t.add_argument(
+        "--wrench-duration-s", type=float, default=DEFAULT_WRENCH_DURATION_S
+    )
+    p2t.add_argument(
+        "--linear-velocity-min-mps", type=float, default=DEFAULT_LINEAR_VELOCITY_MIN_MPS
+    )
+    p2t.add_argument(
+        "--linear-velocity-max-mps", type=float, default=DEFAULT_LINEAR_VELOCITY_MAX_MPS
+    )
+    p2t.add_argument(
+        "--angular-velocity-min-rps",
+        type=float,
+        default=DEFAULT_ANGULAR_VELOCITY_MIN_RPS,
+    )
+    p2t.add_argument(
+        "--angular-velocity-max-rps",
+        type=float,
+        default=DEFAULT_ANGULAR_VELOCITY_MAX_RPS,
+    )
     p2t.add_argument("--tuning-gate-max-success-rate", type=float, default=0.5)
 
     p3 = subparsers.add_parser(
-        "stage3", help="Post-process Stage 2 or schema-v2 fast replay into metrics, plots, and tiled video"
+        "stage3",
+        help="Post-process Stage 2 or schema-v2 fast replay into metrics, plots, and tiled video",
     )
     p3_source = p3.add_mutually_exclusive_group(required=True)
     p3_source.add_argument("--stage2-dir", type=str)
@@ -3495,22 +4358,36 @@ def build_parser() -> argparse.ArgumentParser:
     p3.add_argument("--render-height", type=int, default=108)
     p3.add_argument("--failed-render-width", type=int, default=1920)
     p3.add_argument("--failed-render-height", type=int, default=1080)
-    p3.add_argument("--skip-failed-videos", action="store_true", help="Skip optional per-failure 1080p exports")
+    p3.add_argument(
+        "--skip-failed-videos",
+        action="store_true",
+        help="Skip optional per-failure 1080p exports",
+    )
     p3.add_argument(
         "--render-failed-videos",
         action="store_true",
         help="Explicitly render optional per-failure videos for fast replay (off by default)",
     )
 
-    p4 = subparsers.add_parser("render-failed-videos", help="Render one 1080p replay video per failed Stage 2 run")
+    p4 = subparsers.add_parser(
+        "render-failed-videos",
+        help="Render one 1080p replay video per failed Stage 2 run",
+    )
     p4.add_argument("--stage2-dir", type=str, required=True)
     p4.add_argument("--video-fps", type=int, default=25)
     p4.add_argument("--render-width", type=int, default=1920)
     p4.add_argument("--render-height", type=int, default=1080)
 
-    p5 = subparsers.add_parser("analyze-failures", help="Analyze which initial states are associated with failed recoveries")
+    p5 = subparsers.add_parser(
+        "analyze-failures",
+        help="Analyze which initial states are associated with failed recoveries",
+    )
     p5.add_argument("--stage2-dir", type=str, required=True)
-    p5.add_argument("--report-path", type=str, default="BFM_ZERO_FALLEN_RECOVERY_FAILURE_ANALYSIS.md")
+    p5.add_argument(
+        "--report-path",
+        type=str,
+        default="BFM_ZERO_FALLEN_RECOVERY_FAILURE_ANALYSIS.md",
+    )
 
     ps = subparsers.add_parser("_sim_runner", help=argparse.SUPPRESS)
     ps.add_argument("--mode", choices=["replay", "induce"], required=True)

@@ -159,3 +159,73 @@ def test_stage2_adapter_preserves_order_and_first_100(tmp_path) -> None:
     source = load_stage2_source(stage2, tmp_path)
     assert [trial.attempt_id for trial in source.trials] == list(range(100))
     assert source.trials[-1].qpos[0, 0] == 99
+
+
+def test_amp_schema_v3_source_needs_no_bfm_goal_or_checkpoint(tmp_path) -> None:
+    run = tmp_path / "amp"
+    run.mkdir()
+    actor = tmp_path / "policy.onnx"
+    torchscript = tmp_path / "policy.pt"
+    env_config = tmp_path / "env.yaml"
+    for path, payload in ((actor, b"onnx"), (torchscript, b"torch"), (env_config, b"env")):
+        path.write_bytes(payload)
+    hashes = {
+        "actor_sha256": hashlib.sha256(actor.read_bytes()).hexdigest(),
+        "torchscript_sha256": hashlib.sha256(torchscript.read_bytes()).hexdigest(),
+        "environment_config_sha256": hashlib.sha256(env_config.read_bytes()).hexdigest(),
+    }
+    manifest = {
+        "schema_version": 3,
+        "run_id": "amp-synthetic",
+        "model_provider": {"identity": "legged-lab-amp", "version": 1},
+        "config": {
+            "seed": 0,
+            "fallen_height_m": 0.45,
+            "recovery_height_m": 0.75,
+            "horizon_s": 8.0,
+        },
+        "paths": {
+            "actor": str(actor),
+            "torchscript": str(torchscript),
+            "environment_config": str(env_config),
+        },
+        "hashes": hashes,
+        "goal_z": None,
+    }
+    (run / "manifest.json").write_text(json.dumps(manifest))
+    (run / "summary.json").write_text(json.dumps({"complete": True}))
+    attempts = 101
+    with h5py.File(run / "round_000.h5", "w") as handle:
+        handle.attrs.update(
+            schema_version=3,
+            round_index=0,
+            complete=True,
+            accepted_count=attempts,
+            attempted_count=attempts,
+        )
+        shapes = {
+            "provider_input": (attempts, 401, 570),
+            "qpos": (attempts, 401, 36),
+            "qvel": (attempts, 401, 35),
+            "action": (attempts, 400, 29),
+            "terminated": (attempts, 400),
+            "truncated": (attempts, 400),
+        }
+        for name, shape in shapes.items():
+            dtype = np.bool_ if name in ("terminated", "truncated") else np.float32
+            handle.create_dataset(name, shape=shape, dtype=dtype, fillvalue=0)
+        group = handle.create_group("attempts")
+        group.create_dataset("accepted", data=np.ones(attempts, dtype=np.bool_))
+        group.create_dataset("recovered", data=np.ones(attempts, dtype=np.bool_))
+        strings = h5py.string_dtype("utf-8")
+        group.create_dataset(
+            "metadata_json",
+            data=[json.dumps({"attempt_index": index}) for index in range(attempts)],
+            dtype=strings,
+        )
+    source = load_fast_source(run, tmp_path)
+    assert source.source_kind == "fast_replay_v3_amp"
+    assert source.goal_z is None and source.goal_key == ""
+    assert [trial.attempt_id for trial in source.trials] == list(range(100))
+    assert source.trials[0].observations["provider_input"].shape == (401, 570)
+    assert "excluded" in source.model["latent_inspector"]

@@ -91,3 +91,31 @@ def test_rejects_nonfinite_replay_state(tmp_path, field) -> None:
     metrics = [TrialMetrics(bool(flag), False, 0.4, 0.8) for flag in mask]
     with pytest.raises(ValueError, match=f"{field} contains non-finite values"):
         write_round_atomic(tmp_path / "round_000.h5", 0, data, mask, attempts, metrics)
+
+
+def test_schema_v3_provider_input_storage(tmp_path) -> None:
+    attempts = 2
+    data = {
+        "provider_input": np.zeros((attempts, 401, 570), dtype=np.float32),
+        "qpos": np.zeros((attempts, 401, 36), dtype=np.float32),
+        "qvel": np.zeros((attempts, 401, 35), dtype=np.float32),
+        "action": np.zeros((attempts, 400, 29), dtype=np.float32),
+        "terminated": np.zeros((attempts, 400), dtype=np.bool_),
+        "truncated": np.zeros((attempts, 400), dtype=np.bool_),
+    }
+    mask = np.ones(attempts, dtype=np.bool_)
+    metadata = [{"seed": index} for index in range(attempts)]
+    metrics = [TrialMetrics(True, True, 0.4, 0.8) for _ in range(attempts)]
+    path = tmp_path / "round_000.h5"
+    write_round_atomic(
+        path,
+        0,
+        data,
+        mask,
+        metadata,
+        metrics,
+        schema_version=3,
+        observation_fields={"provider_input": 570},
+    )
+    assert valid_round(path, 0, schema_version=3, observation_fields={"provider_input": 570})
+    assert not valid_round(path, 0)

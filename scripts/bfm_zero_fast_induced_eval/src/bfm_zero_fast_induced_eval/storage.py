@@ -18,11 +18,12 @@ from .schema import (
 )
 
 
-def _expected_shapes(accepted: int) -> dict[str, tuple[int, ...]]:
-    result = {name: (accepted, OBSERVATION_FRAMES, dim) for name, dim in OBSERVATION_FIELDS.items()}
-    result.update(
-        {name: (accepted, OBSERVATION_FRAMES, dim) for name, dim in REPLAY_STATE_FIELDS.items()}
-    )
+def _expected_shapes(
+    accepted: int, observation_fields: dict[str, int] | None = None
+) -> dict[str, tuple[int, ...]]:
+    fields = OBSERVATION_FIELDS if observation_fields is None else observation_fields
+    result = {name: (accepted, OBSERVATION_FRAMES, dim) for name, dim in fields.items()}
+    result.update({name: (accepted, OBSERVATION_FRAMES, dim) for name, dim in REPLAY_STATE_FIELDS.items()})
     result.update(
         action=(accepted, TRANSITIONS, ACTION_DIM),
         terminated=(accepted, TRANSITIONS),
@@ -31,17 +32,23 @@ def _expected_shapes(accepted: int) -> dict[str, tuple[int, ...]]:
     return result
 
 
-def valid_round(path: Path, expected_round: int | None = None) -> bool:
+def valid_round(
+    path: Path,
+    expected_round: int | None = None,
+    *,
+    schema_version: int = SCHEMA_VERSION,
+    observation_fields: dict[str, int] | None = None,
+) -> bool:
     try:
         with h5py.File(path, "r") as handle:
             if not bool(handle.attrs.get("complete", False)):
                 return False
-            if int(handle.attrs.get("schema_version", -1)) != SCHEMA_VERSION:
+            if int(handle.attrs.get("schema_version", -1)) != schema_version:
                 return False
             if expected_round is not None and int(handle.attrs["round_index"]) != expected_round:
                 return False
             accepted = int(handle.attrs["accepted_count"])
-            for name, shape in _expected_shapes(accepted).items():
+            for name, shape in _expected_shapes(accepted, observation_fields).items():
                 if name not in handle or handle[name].shape != shape:
                     return False
             attempted_shape = (int(handle.attrs["attempted_count"]),)
@@ -58,12 +65,15 @@ def write_round_atomic(
     attempts: list[dict[str, Any]],
     metrics: list[TrialMetrics],
     rollout_wall_time_s: float = 0.0,
+    *,
+    schema_version: int = SCHEMA_VERSION,
+    observation_fields: dict[str, int] | None = None,
 ) -> None:
     accepted_mask = np.asarray(accepted_mask, dtype=np.bool_)
     accepted_count = int(accepted_mask.sum())
     if len(attempts) != accepted_mask.size or len(metrics) != accepted_mask.size:
         raise ValueError("attempt metadata, metrics, and mask lengths differ")
-    expected = _expected_shapes(accepted_mask.size)
+    expected = _expected_shapes(accepted_mask.size, observation_fields)
     for name, full_shape in expected.items():
         value = np.asarray(trajectories[name])
         if value.shape != full_shape:
@@ -76,7 +86,7 @@ def write_round_atomic(
     temporary.unlink(missing_ok=True)
     with h5py.File(temporary, "w") as handle:
         handle.attrs.update(
-            schema_version=SCHEMA_VERSION,
+            schema_version=schema_version,
             round_index=round_index,
             attempted_count=accepted_mask.size,
             accepted_count=accepted_count,
